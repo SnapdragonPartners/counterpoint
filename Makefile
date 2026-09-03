@@ -51,8 +51,8 @@ install-hooks:
 	if [ -z "$$hooks" ]; then echo "not a git repository; hooks not installed"; exit 0; fi; \
 	mkdir -p "$$hooks"; \
 	if [ ! -w "$$hooks" ]; then echo "hooks directory $$hooks is not writable; hooks not installed"; exit 0; fi; \
-	cp hooks/pre-commit "$$hooks/pre-commit" && chmod +x "$$hooks/pre-commit"; \
-	echo "git hooks installed into $$hooks"
+	cp hooks/pre-commit "$$hooks/pre-commit" && chmod +x "$$hooks/pre-commit" \
+		&& echo "git hooks installed into $$hooks"
 
 # Regenerate the codex app-server JSON schema from the installed CLI into the
 # gitignored .schema/ directory so protocol claims can be checked against the
