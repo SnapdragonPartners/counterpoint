@@ -53,8 +53,8 @@ Claude Code (or another MCP client)
 The MVP is a Go executable that:
 
 - serves one blocking MCP tool over stdio;
-- launches and speaks JSON-RPC to a local `codex app-server` process, using
-  its inline review mode on a persistent thread;
+- launches a local `codex app-server` process per review and uses its inline
+  review mode on a persistent thread;
 - identifies workflows by canonical repository plus full branch ref;
 - persists the corresponding Codex thread IDs in a small JSON state file;
 - requires a clean worktree at the branch tip and reviews the whole branch in a
@@ -77,13 +77,13 @@ reviewers, remote execution, push/PR automation, and a general workflow engine.
 
 ## Timeouts
 
-Each review is bounded by a Counterpoint timeout that defaults to twenty
-minutes. Claude Code separately aborts a stdio MCP tool call that has produced
-no response for thirty minutes by default, controlled by the
-`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. If you
-raise Counterpoint's timeout above that limit, raise the client limit too. The
-per-call wall-clock limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field
-in `.mcp.json`, defaults to many hours and normally needs no change.
+Each review is bounded by a fixed twenty-minute Counterpoint timeout. Claude
+Code separately aborts a stdio MCP tool call that has produced no response for
+thirty minutes by default, controlled by the
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. Keep
+that value above twenty minutes if you have lowered it. The per-call wall-clock
+limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`,
+defaults to many hours and normally needs no change.
 
 ## Name
 

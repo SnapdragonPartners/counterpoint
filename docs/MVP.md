@@ -178,10 +178,12 @@ State records only completed reviews. Counterpoint does not persist in-flight
 turns.
 
 The same normalized request is idempotent. The request identity is the
-canonical repository, full branch ref, resolved commit object ID, and a hash of
-the branch notes. If all four match the last completed request, Counterpoint
-returns the stored completed review rather than creating another Codex turn. A
-changed commit with identical notes is a new request. The state therefore also
+canonical repository, full branch ref, resolved commit object ID, resolved
+merge-base object ID, and a hash of the branch notes. If all five match the
+last completed request, Counterpoint returns the stored completed review rather
+than creating another Codex turn. A changed commit with identical notes is a new
+request, and so is an unchanged tip whose merge base moved because the primary
+branch advanced, since the reviewed diff differs. The state therefore also
 stores the last review text and warnings, although they are omitted from the
 abbreviated example above.
 
@@ -210,14 +212,23 @@ the right checkout.
 
 ## Codex app-server integration
 
-Counterpoint launches one child `codex app-server` process using the default
-JSONL-over-stdio transport. It keeps stderr separate from the protocol stream.
+Counterpoint launches a child `codex app-server` process for each review,
+using the default JSONL-over-stdio transport, and keeps stderr separate from
+the protocol stream.
 
-The child is started lazily on the first `review` call, not at MCP startup, so
-the tool can be listed and inspected when Codex is missing. If the Codex CLI is
-absent or unauthenticated, `review` returns a clear installation or
-authentication error. If the child exits, the next `review` call starts a new
-one. Automatic restart within the same tool call is not required.
+The child's lifetime is bounded by the review lock: it is started after the
+lock is acquired and terminated, with its exit awaited, before the lock is
+released. This holds for completed, failed, interrupted, and errored reviews.
+Codex keeps per-thread writer locks, so a long-lived child in one Counterpoint
+process could block another process from resuming the same thread; ending the
+child inside the lock is the ownership handoff. Starting the child costs a few
+seconds per review, which is small against observed review durations.
+
+No child runs at MCP startup, so the tool can be listed and inspected when
+Codex is missing. If the Codex CLI is absent or unauthenticated, `review`
+returns a clear installation or authentication error. Idempotent replays are
+served from state without starting a child. Automatic restart of a child that
+exits mid-review is not required; the call returns an error.
 
 ### Protocol subset
 
@@ -262,6 +273,18 @@ every server-originated request still receives an explicit bounded response:
 
 Each declined request is recorded in the response `warnings` array and in the
 stderr log.
+
+### Model and reasoning effort
+
+The MVP does not select a model. Codex's configured default model applies, so
+the reviewer model is whatever the user's Codex configuration names.
+Counterpoint does set reasoning effort: it passes a `model_reasoning_effort`
+configuration override of `high` on the child command line, because review
+quality matters more than latency and interactive Codex configurations often
+use a lower setting. The effective model and effort reported by `thread/start`
+or `thread/resume` are logged. If the configured model does not accept that
+effort value, the review fails with the app-server's error. Model selection and
+per-repository effort settings are deferred.
 
 ### Reader
 
@@ -308,16 +331,18 @@ prompt paths and templates are deferred.
 ## Concurrency and cancellation
 
 Reviews are serialized across all Counterpoint processes with a single advisory
-file lock held for the entire review, from validation through the state write.
+file lock held for the entire review, from validation through the state write
+and the child's exit.
 Multiple MCP clients each spawn their own Counterpoint process, so a
 process-local lock is insufficient. Acquisition uses a short bounded wait and
 then fails with a clear "another review is in progress" error rather than
 queueing behind a full review. Serializing reviews for different branches is an
 accepted MVP limitation.
 
-Every review turn has a bounded timeout, configurable with a default of twenty
-minutes. The default sits below the MCP client's idle timeout so Counterpoint
-fails first with a clear error. Observed reviews rarely exceed five minutes.
+Every review turn has a fixed timeout of twenty minutes in the MVP. The limit
+sits below the MCP client's idle timeout so Counterpoint fails first with a
+clear error. Observed reviews rarely exceed five minutes. A configurable
+timeout is deferred.
 
 On timeout, MCP request cancellation, or closure of Counterpoint's own stdin,
 Counterpoint sends `turn/interrupt`, waits briefly for the terminal event, and
@@ -354,10 +379,10 @@ dumps by default.
 
 Claude Code's per-call MCP tool timeout defaults to many hours, but its idle
 timeout for stdio servers aborts a call that produces no response and no
-progress notification for thirty minutes. Counterpoint's default turn timeout is
-set below that limit and does not send progress notifications in the MVP. Users
-who raise Counterpoint's timeout above the client idle limit must also raise the
-client setting; the README documents the relevant settings.
+progress notification for thirty minutes. Counterpoint's fixed twenty-minute
+turn timeout sits below that limit, and the MVP does not send progress
+notifications, so default client settings need no change. The README names the
+client settings for users who have lowered them.
 
 ## Required tests
 
@@ -374,7 +399,7 @@ Unit tests cover:
 - JSON state load, atomic replacement, and malformed-state failure without
   overwrite;
 - request hashing and idempotent replay, including a changed commit with
-  identical notes;
+  identical notes and an unchanged commit with a moved merge base;
 - JSON-RPC response, notification, and server-request dispatch;
 - interleaved app-server events;
 - oversized JSONL messages;
@@ -384,7 +409,9 @@ Unit tests cover:
   fallback;
 - `failed` and `interrupted` terminal handling;
 - turn timeout and cancellation issuing `turn/interrupt`; and
-- cross-process lock acquisition, including bounded wait and clear failure.
+- cross-process lock acquisition, including bounded wait and clear failure;
+  and
+- child process termination before lock release on every outcome.
 
 An integration test uses a fake app-server subprocess to exercise
 initialization, new-thread review, persisted restart, thread resume, and a
@@ -422,7 +449,9 @@ The MVP is accepted when a clean local demonstration can:
 - Structured verdict enforcement or finding databases. The app-server's
   output-schema option on turn start is a candidate mechanism.
 - An explicit thread reset operation.
-- Configurable prompts, model selection, and per-repository policy files.
+- Configurable prompts, model selection, reasoning-effort selection, and
+  per-repository policy files.
+- A configurable review timeout.
 - Branch lifecycle management and automatic state garbage collection.
 - Exact Codex CLI version enforcement.
 - Remote app-server hosts, containers, and cloud execution.
