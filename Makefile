@@ -45,12 +45,12 @@ $(GOLANGCI_LINT):
 	@mv $(TOOLS_DIR)/golangci-lint $(GOLANGCI_LINT)
 
 # Resolves the hooks directory through Git so linked worktrees and a
-# configured core.hooksPath work. Reports rather than silently skipping.
+# configured core.hooksPath work. Fails loudly when it cannot install.
 install-hooks:
 	@hooks="$$(git rev-parse --git-path hooks 2>/dev/null)"; \
-	if [ -z "$$hooks" ]; then echo "not a git repository; hooks not installed"; exit 0; fi; \
+	if [ -z "$$hooks" ]; then echo "not a git repository; hooks not installed" >&2; exit 1; fi; \
 	mkdir -p "$$hooks"; \
-	if [ ! -w "$$hooks" ]; then echo "hooks directory $$hooks is not writable; hooks not installed"; exit 0; fi; \
+	if [ ! -w "$$hooks" ]; then echo "hooks directory $$hooks is not writable; hooks not installed" >&2; exit 1; fi; \
 	cp hooks/pre-commit "$$hooks/pre-commit" && chmod +x "$$hooks/pre-commit" \
 		&& echo "git hooks installed into $$hooks"
 

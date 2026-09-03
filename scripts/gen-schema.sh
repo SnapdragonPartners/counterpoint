@@ -20,7 +20,10 @@ if ! command -v codex >/dev/null 2>&1; then
 	exit 1
 fi
 
-root="$(git rev-parse --show-toplevel)"
+if ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+	echo "not inside a git worktree; run from a checkout of the repository" >&2
+	exit 1
+fi
 out="$root/.schema"
 
 rm -rf "$out"
