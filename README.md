@@ -85,6 +85,18 @@ that value above twenty minutes if you have lowered it. The per-call wall-clock
 limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`,
 defaults to many hours and normally needs no change.
 
+## Development
+
+```bash
+make check     # gofmt check, go vet, golangci-lint, go test -race; what CI runs
+make build     # bin/counterpoint
+make schema    # regenerate the codex app-server JSON schema into .schema/
+make install-hooks  # pre-commit hook that runs make check
+```
+
+The MCP server is not implemented yet; the binary currently supports only
+`--version`.
+
 ## Name
 
 In musical counterpoint, independent voices retain their own lines while

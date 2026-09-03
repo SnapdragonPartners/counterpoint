@@ -1,0 +1,16 @@
+# Build output
+bin/
+
+# Regenerated codex app-server schema (see `make schema`)
+.schema/
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
+*.swp

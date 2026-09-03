@@ -1,0 +1,52 @@
+name: Go CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # setup-go caches Go's module and build caches but not golangci-lint's
+      # analysis cache. Keyed per commit with a prefix restore key so each run
+      # reuses the most recent cache; the Makefile (which pins the lint
+      # version) and the lint config are hashed in so a bump starts fresh.
+      - name: Cache golangci-lint analysis
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-lint-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-lint-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yaml') }}-
+
+      # The pinned golangci-lint binary is built by `go install` into
+      # bin/tools; caching it saves the build on every run. Keyed on the
+      # Makefile, which holds the pin.
+      - name: Cache golangci-lint binary
+        uses: actions/cache@v4
+        with:
+          path: bin/tools
+          key: golangci-lint-bin-${{ runner.os }}-${{ hashFiles('Makefile') }}
+
+      - name: Download dependencies
+        run: go mod download
+
+      # Same targets, same order, as the local pre-commit hook.
+      - name: Format, vet, lint, test
+        run: make check
+
+      - name: Build
+        run: make build
