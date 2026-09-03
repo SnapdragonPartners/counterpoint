@@ -279,15 +279,17 @@ stderr log.
 The MVP does not select a model. Codex's configured default model applies, so
 the reviewer model is whatever the user's Codex configuration names.
 
-Counterpoint does set reasoning effort, because the reviewer should run at the
-highest level the model offers regardless of the user's interactive setting.
-The MVP hardcodes the effort as a single named constant, currently `xhigh`,
-passed as a `model_reasoning_effort` configuration override on the child
-command line. Effort strings are model-advertised rather than a fixed enum, and
-`model/list` reports each model's supported levels, but automatic selection of
-the highest advertised level is deferred: the list's order is not a documented
-contract, and the top level on some models enables multi-agent behavior that a
-reviewer should not adopt implicitly.
+Counterpoint does set reasoning effort, so the reviewer runs at a deliberate
+level regardless of the user's interactive setting. The MVP hardcodes the
+effort as a single named constant, `xhigh`, chosen by DR as the fixed review
+policy for the MVP, and passes it as a `model_reasoning_effort` configuration
+override on the child command line. This is a fixed choice, not a rule that
+Counterpoint selects the highest available level. Effort strings are
+model-advertised rather than a fixed enum, and `model/list` reports each
+model's supported levels; the installed catalog advertises levels above
+`xhigh` on some models, including `ultra`, which enables automatic task
+delegation that a reviewer should not adopt implicitly. Changing the constant
+is a one-line edit; selecting a level per model from the catalog is deferred.
 
 The effective model and effort reported by `thread/start` or `thread/resume`
 are logged. If the configured model does not accept the constant, the review
@@ -456,9 +458,8 @@ The MVP is accepted when a clean local demonstration can:
 - Structured verdict enforcement or finding databases. The app-server's
   output-schema option on turn start is a candidate mechanism.
 - An explicit thread reset operation.
-- Configurable prompts, model selection, reasoning-effort selection including
-  automatic choice of the highest advertised level, and per-repository policy
-  files.
+- Configurable prompts, model selection, per-model reasoning-effort selection
+  from the catalog, and per-repository policy files.
 - A configurable review timeout.
 - Branch lifecycle management and automatic state garbage collection.
 - Exact Codex CLI version enforcement.
