@@ -107,14 +107,16 @@ the author's claims are correct.
 
 ## Development and verification
 
-Use the repository's checked-in build automation once it exists. Until then,
-the baseline Go checks are:
+Use the repository's checked-in build automation:
 
 ```bash
-gofmt -w <changed-go-files>
-go test ./...
-go vet ./...
+make check    # gofmt check, go vet, golangci-lint, go test -race; identical to CI
+make schema   # regenerate the app-server schema from the installed Codex CLI
 ```
+
+Run `make install-hooks` once per clone so the pre-commit hook runs the same
+checks. Run `make schema` before making protocol claims and verify them against
+the generated bundle in `.schema/`.
 
 Do not run live Codex integration tests, paid model calls, or tests using a
 developer's real credentials without DR's explicit approval for that run. Use a

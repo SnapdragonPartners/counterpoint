@@ -1,0 +1,55 @@
+# Lint configuration for Counterpoint. A deliberately smaller set than maestro:
+# correctness, error handling, security, and comment hygiene, without the
+# complexity and duplication metrics that add noise to a small codebase.
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - gofmt
+    - goimports
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+    - errcheck
+    - errorlint
+    - gosimple
+    - unconvert
+    - unparam
+    - revive
+    - gosec
+    - nilerr
+    - nilnil
+    - forcetypeassert
+    - copyloopvar
+    - gocritic
+    - gochecknoinits
+    - gochecknoglobals
+    - contextcheck
+    - noctx
+    - bodyclose
+    - prealloc
+    - predeclared
+    - whitespace
+    - godot
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/SnapdragonPartners/counterpoint
+  godot:
+    scope: toplevel
+  revive:
+    rules:
+      - name: exported
+        arguments: ["checkPrivateReceivers", "disableStutteringCheck"]
+
+issues:
+  exclude-rules:
+    # Tests may use globals for fixtures and skip exported-doc requirements.
+    - path: _test\.go
+      linters:
+        - gochecknoglobals
+        - revive

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Pre-commit hook for Counterpoint: run the same checks CI runs.
+# Install with `make install-hooks`. Never bypass with --no-verify; fix the
+# failure instead (see CLAUDE.md).
+set -e
+
+echo "counterpoint pre-commit: make check"
+make check
