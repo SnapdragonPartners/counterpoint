@@ -27,7 +27,8 @@ defines the first implementation.
 3. The agent calls Counterpoint's blocking MCP review tool with the repository,
    branch, commit, and branch notes.
 4. Counterpoint resumes the persistent Codex thread for that repository and
-   branch, and Codex reviews the exact commit without modifying the workspace.
+   branch, and Codex reviews the branch snapshot at that commit, from its merge
+   base with the primary branch to the tip, without modifying the workspace.
 5. The authoring agent addresses findings, commits the next round, and calls the
    same tool again. Codex retains the earlier review context.
 6. After Codex approves, work stops at a human gate. Counterpoint does not push,
@@ -52,11 +53,15 @@ Claude Code (or another MCP client)
 The MVP is a Go executable that:
 
 - serves one blocking MCP tool over stdio;
-- launches and speaks JSON-RPC to a local `codex app-server` process;
+- launches and speaks JSON-RPC to a local `codex app-server` process, using
+  its inline review mode on a persistent thread;
 - identifies workflows by canonical repository plus full branch ref;
 - persists the corresponding Codex thread IDs in a small JSON state file;
-- reviews exact local commits in a read-only Codex sandbox; and
-- returns Codex's review to the MCP client.
+- requires a clean worktree at the branch tip and reviews the whole branch in a
+  read-only, network-disabled Codex sandbox;
+- serializes reviews across processes with a file lock and bounds each review
+  with a timeout; and
+- returns Codex's review, plus any bridge warnings, to the MCP client.
 
 The MVP deliberately excludes a resident daemon, background jobs, multiple
 reviewers, remote execution, push/PR automation, and a general workflow engine.
@@ -65,8 +70,20 @@ reviewers, remote execution, push/PR automation, and a general workflow engine.
 
 - Go, for building Counterpoint.
 - A locally installed and authenticated Codex CLI that provides
-  `codex app-server`.
+  `codex app-server`. Counterpoint is developed against `codex-cli 0.153.1`
+  and fails clearly on an incompatible protocol rather than enforcing an exact
+  version.
 - An MCP client such as Claude Code.
+
+## Timeouts
+
+Each review is bounded by a Counterpoint timeout that defaults to twenty
+minutes. Claude Code separately aborts a stdio MCP tool call that has produced
+no response for thirty minutes by default, controlled by the
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. If you
+raise Counterpoint's timeout above that limit, raise the client limit too. The
+per-call wall-clock limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field
+in `.mcp.json`, defaults to many hours and normally needs no change.
 
 ## Name
 
