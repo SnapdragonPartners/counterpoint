@@ -4,9 +4,12 @@ GOLANGCI_LINT_VERSION := v1.64.8
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
-# Directory for the app-server schema regenerated from the installed Codex CLI.
-# Gitignored: the bundle is large and is regenerated per developer machine.
-SCHEMA_DIR := .schema
+# Tools are installed into a repository-local, gitignored directory at an
+# exact version, so local and CI lint runs use the same binary regardless of
+# what is on PATH. The version is part of the file name so a bump installs
+# fresh instead of reusing a stale binary.
+TOOLS_DIR := $(CURDIR)/bin/tools
+GOLANGCI_LINT := $(TOOLS_DIR)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/counterpoint ./cmd/counterpoint
@@ -27,31 +30,35 @@ fmt-check:
 		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
 	fi
 
-lint: install-lint
-	golangci-lint run
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run
 
 # Everything CI runs, in the same order.
 check: fmt-check vet lint test
 
-install-lint:
-	@which golangci-lint > /dev/null || { \
-		echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."; \
-		go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
-	}
-	@golangci-lint version 2>/dev/null | grep -q "$(GOLANGCI_LINT_VERSION)" || \
-		echo "warning: golangci-lint on PATH is not $(GOLANGCI_LINT_VERSION); results may differ from CI"
+install-lint: $(GOLANGCI_LINT)
 
-# Non-fatal for read-only checkouts and CI.
+$(GOLANGCI_LINT):
+	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION) into $(TOOLS_DIR)..."
+	@mkdir -p $(TOOLS_DIR)
+	GOBIN=$(TOOLS_DIR) go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@mv $(TOOLS_DIR)/golangci-lint $(GOLANGCI_LINT)
+
+# Resolves the hooks directory through Git so linked worktrees and a
+# configured core.hooksPath work. Reports rather than silently skipping.
 install-hooks:
-	@if [ -d .git ] && [ -w .git/hooks ]; then \
-		cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit; \
-		echo "git hooks installed"; \
-	fi
+	@hooks="$$(git rev-parse --git-path hooks 2>/dev/null)"; \
+	if [ -z "$$hooks" ]; then echo "not a git repository; hooks not installed"; exit 0; fi; \
+	mkdir -p "$$hooks"; \
+	if [ ! -w "$$hooks" ]; then echo "hooks directory $$hooks is not writable; hooks not installed"; exit 0; fi; \
+	cp hooks/pre-commit "$$hooks/pre-commit" && chmod +x "$$hooks/pre-commit"; \
+	echo "git hooks installed into $$hooks"
 
-# Regenerate the codex app-server JSON schema from the installed CLI so
-# protocol claims can be checked against the version actually in use.
+# Regenerate the codex app-server JSON schema from the installed CLI into the
+# gitignored .schema/ directory so protocol claims can be checked against the
+# version actually in use.
 schema:
-	scripts/gen-schema.sh $(SCHEMA_DIR)
+	scripts/gen-schema.sh
 
 clean:
 	rm -rf bin

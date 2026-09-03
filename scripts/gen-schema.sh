@@ -1,19 +1,27 @@
 #!/bin/sh
 # Regenerate the codex app-server JSON schema bundle from the installed CLI.
 #
-# Usage: scripts/gen-schema.sh [output-dir]   (default: .schema)
+# Usage: scripts/gen-schema.sh
 #
-# The output directory is gitignored. VERSION inside it records the CLI that
-# produced the bundle so protocol claims can be checked against docs/MVP.md,
-# which names the version Counterpoint is developed against.
+# Output always goes to .schema/ at the repository root; the directory is
+# gitignored and is the only path this script deletes. VERSION inside it
+# records the CLI that produced the bundle so protocol claims can be checked
+# against docs/MVP.md, which names the version Counterpoint is developed
+# against.
 set -eu
 
-out="${1:-.schema}"
+if [ "$#" -ne 0 ]; then
+	echo "usage: scripts/gen-schema.sh (takes no arguments)" >&2
+	exit 2
+fi
 
 if ! command -v codex >/dev/null 2>&1; then
 	echo "codex CLI not found on PATH; install it first" >&2
 	exit 1
 fi
+
+root="$(git rev-parse --show-toplevel)"
+out="$root/.schema"
 
 rm -rf "$out"
 mkdir -p "$out"

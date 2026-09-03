@@ -32,6 +32,15 @@ jobs:
           restore-keys: |
             golangci-lint-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yaml') }}-
 
+      # The pinned golangci-lint binary is built by `go install` into
+      # bin/tools; caching it saves the build on every run. Keyed on the
+      # Makefile, which holds the pin.
+      - name: Cache golangci-lint binary
+        uses: actions/cache@v4
+        with:
+          path: bin/tools
+          key: golangci-lint-bin-${{ runner.os }}-${{ hashFiles('Makefile') }}
+
       - name: Download dependencies
         run: go mod download
 
