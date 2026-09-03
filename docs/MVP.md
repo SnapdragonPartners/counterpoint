@@ -278,13 +278,21 @@ stderr log.
 
 The MVP does not select a model. Codex's configured default model applies, so
 the reviewer model is whatever the user's Codex configuration names.
-Counterpoint does set reasoning effort: it passes a `model_reasoning_effort`
-configuration override of `high` on the child command line, because review
-quality matters more than latency and interactive Codex configurations often
-use a lower setting. The effective model and effort reported by `thread/start`
-or `thread/resume` are logged. If the configured model does not accept that
-effort value, the review fails with the app-server's error. Model selection and
-per-repository effort settings are deferred.
+
+Counterpoint does set reasoning effort, because the reviewer should run at the
+highest level the model offers regardless of the user's interactive setting.
+The MVP hardcodes the effort as a single named constant, currently `xhigh`,
+passed as a `model_reasoning_effort` configuration override on the child
+command line. Effort strings are model-advertised rather than a fixed enum, and
+`model/list` reports each model's supported levels, but automatic selection of
+the highest advertised level is deferred: the list's order is not a documented
+contract, and the top level on some models enables multi-agent behavior that a
+reviewer should not adopt implicitly.
+
+The effective model and effort reported by `thread/start` or `thread/resume`
+are logged. If the configured model does not accept the constant, the review
+fails with the app-server's error rather than retrying at a lower level. Model
+selection and per-repository effort settings are deferred.
 
 ### Reader
 
@@ -408,9 +416,8 @@ Unit tests cover:
 - extraction of the review text from the review-mode item with agent-message
   fallback;
 - `failed` and `interrupted` terminal handling;
-- turn timeout and cancellation issuing `turn/interrupt`; and
-- cross-process lock acquisition, including bounded wait and clear failure;
-  and
+- turn timeout and cancellation issuing `turn/interrupt`;
+- cross-process lock acquisition, including bounded wait and clear failure; and
 - child process termination before lock release on every outcome.
 
 An integration test uses a fake app-server subprocess to exercise
@@ -449,8 +456,9 @@ The MVP is accepted when a clean local demonstration can:
 - Structured verdict enforcement or finding databases. The app-server's
   output-schema option on turn start is a candidate mechanism.
 - An explicit thread reset operation.
-- Configurable prompts, model selection, reasoning-effort selection, and
-  per-repository policy files.
+- Configurable prompts, model selection, reasoning-effort selection including
+  automatic choice of the highest advertised level, and per-repository policy
+  files.
 - A configurable review timeout.
 - Branch lifecycle management and automatic state garbage collection.
 - Exact Codex CLI version enforcement.
