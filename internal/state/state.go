@@ -192,7 +192,7 @@ func (st *Store) Save(s *State) error {
 // reported size, so a sparse or growing file cannot force a large
 // allocation.
 func readBounded(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // state file path is configured, not user input
+	f, err := os.Open(path) //nolint:gosec // G304: reading the store's own path is this function's purpose; content is bounded and validated
 	if err != nil {
 		return nil, err
 	}

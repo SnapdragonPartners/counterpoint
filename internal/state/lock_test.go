@@ -187,6 +187,38 @@ func TestAcquireLockCreatesParentDirectory(t *testing.T) {
 	}
 }
 
+func TestAcquireLockPreCanceledHasNoSideEffects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fresh", "state.json.lock")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := AcquireLock(ctx, path, time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AcquireLock with canceled context: error = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("directory created despite canceled context: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("lock file created despite canceled context: %v", err)
+	}
+}
+
+func TestAcquireLockCancellationBeatsDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json.lock")
+	release := startHolder(t, path)
+	defer release()
+
+	// Both the wait and the context expire together; cancellation must win
+	// so the caller sees why it stopped.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := AcquireLock(ctx, path, 0)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrLocked) {
+		t.Fatalf("error = %v, want context.Canceled and not ErrLocked", err)
+	}
+}
+
 func TestAcquireLockRejectsUnusablePath(t *testing.T) {
 	// The parent is a regular file, so the directory cannot be created.
 	blocker := filepath.Join(t.TempDir(), "blocker")

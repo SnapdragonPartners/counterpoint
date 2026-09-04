@@ -37,17 +37,27 @@ type Lock struct {
 // lock is per open file description, so it also excludes other goroutines in
 // the same process that call AcquireLock.
 func AcquireLock(ctx context.Context, path string, wait time.Duration) (*Lock, error) {
+	// A canceled caller gets no side effects: no directory, no lock file.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create lock dir %s: %w", dir, err)
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, filePerm) //nolint:gosec // lock file beside the state file, not user input
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, filePerm) //nolint:gosec // G304: opening the caller's lock path is this function's purpose
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)
 	}
 
 	deadline := time.Now().Add(wait)
 	for {
+		// Cancellation is checked before each attempt and takes priority
+		// over the wait deadline.
+		if err := ctx.Err(); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock %s: %w", path, err)
+		}
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return &Lock{f: f}, nil
