@@ -33,8 +33,9 @@ acceptance criteria in `docs/MVP.md`, not here.
 - Codex reviews committed artifacts and code.
 - DR orchestrates, resolves contention, authorizes external effects, and accepts.
 - Work is accepted only after Codex and DR approve it.
-- Until Counterpoint can carry the exchange itself, Claude/Codex communication
-  routes through DR manually.
+- Claude/Codex communication goes through the Counterpoint review tool when it
+  is available in the session; otherwise it routes through DR manually. See
+  "Submitting for review" below.
 
 If Claude and Codex do not converge after reasoned attempts, preserve both
 positions and escalate the decision to DR rather than cycling indefinitely.
@@ -61,6 +62,29 @@ positions and escalate the decision to DR rather than cycling indefinitely.
 Keep at most one feature/development branch open at a time unless DR explicitly
 authorizes parallel work. Parallel fix branches are acceptable when they do not
 share mutable state.
+
+### Submitting for review
+
+Counterpoint is registered as an MCP server in Claude Code, so the review
+handoff is normally a tool call, not a message to DR:
+
+- If the `counterpoint` review tool is available, call it directly with the
+  absolute repository path, the branch, the exact local commit, and the branch
+  notes. The commit must be the branch tip and the checked-out HEAD of a clean
+  worktree, so commit before calling and do not touch the worktree while the
+  review runs. The call blocks for the whole Codex turn, typically several
+  minutes; Claude Code moves it to a background task after two minutes and
+  delivers the result as a task notification. Do not start unrelated work that
+  changes the worktree while waiting. Submit every round through the tool, and
+  do not ask DR to relay when the tool is available.
+- If the tool is not available in the session, write the branch notes and ask
+  DR to submit them to Codex manually, then wait for the relayed findings.
+- Treat the tool result as Codex's review: address every blocking finding as
+  described in the workflow above, and quote the approval or the findings to
+  DR when stopping at the push gate. The reviewer runs in a read-only sandbox
+  and cannot build or run tests, so its verdict is an inspection of the commit
+  against the branch notes and the repository; the author's verification
+  claims must be backed by the commands and outcomes in the notes.
 
 ### Branch notes
 
