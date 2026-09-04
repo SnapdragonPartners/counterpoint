@@ -132,7 +132,7 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 	workflowDir := filepath.Join(resolvedRoot, hex.EncodeToString(sum[:])[:16])
 	checkoutDir := filepath.Join(workflowDir, "checkout")
 	events, _ = os.ReadFile(fakeState + ".events")
-	for _, want := range []string{"cwd:" + checkoutDir + ":workspace-write", "checkout-tmp:" + checkoutDir + ":true"} {
+	for _, want := range []string{"cwd:" + checkoutDir + ":workspace-write", "tmpdir:" + filepath.Join(workflowDir, "tmp") + ":true"} {
 		if !strings.Contains(string(events), want) {
 			t.Errorf("fake events lack %q:\n%s", want, events)
 		}

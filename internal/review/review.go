@@ -289,7 +289,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 			}
 		}()
 		cwd = checkout.Dir
-		sandbox = appserver.Sandbox{Build: true, WritableRoots: []string{checkout.CacheDir}}
+		sandbox = appserver.Sandbox{Build: true, WritableRoots: []string{checkout.CacheDir, checkout.TmpDir}}
 		extraArgs = appserver.BuildConfigArgs(checkout.CacheDir, checkout.TmpDir)
 		prompt.Checkout = checkout.Dir
 		prompt.CacheDir = checkout.CacheDir

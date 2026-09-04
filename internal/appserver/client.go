@@ -75,7 +75,8 @@ type Sandbox struct {
 	// the user's repository.
 	Build bool
 	// WritableRoots is the exact set of extra writable roots expected in
-	// the effective policy when Build is set.
+	// the effective policy when Build is set: the cache and temp
+	// directories beside the checkout.
 	WritableRoots []string
 }
 
@@ -88,13 +89,13 @@ func (s Sandbox) mode() string {
 }
 
 // BuildConfigArgs returns the -c overrides for a build-capable session: the
-// persistent cache directory as the one extra writable root, both implicit
-// temp roots excluded so a repository under /tmp or $TMPDIR stays
-// read-only, and the reviewer's TMPDIR and cache location exported to its
-// commands. Values are TOML basic strings.
+// persistent cache directory and the reviewer's temp directory as the only
+// extra writable roots, both implicit temp roots excluded so a repository
+// under /tmp or $TMPDIR stays read-only, and the reviewer's TMPDIR and cache
+// location exported to its commands. Values are TOML basic strings.
 func BuildConfigArgs(cacheDir, tmpDir string) []string {
 	return []string{
-		"-c", "sandbox_workspace_write.writable_roots=[" + tomlString(cacheDir) + "]",
+		"-c", "sandbox_workspace_write.writable_roots=[" + tomlString(cacheDir) + "," + tomlString(tmpDir) + "]",
 		"-c", "sandbox_workspace_write.exclude_slash_tmp=true",
 		"-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
 		"-c", "shell_environment_policy.set.TMPDIR=" + tomlString(tmpDir),

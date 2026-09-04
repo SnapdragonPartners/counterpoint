@@ -331,16 +331,17 @@ func (f *fakeServer) handle(env *envelope) {
 	}
 }
 
-// observeCheckout records, at turn start, whether the thread's cwd holds
-// the reviewer's temp directory and, in the modify-checkout scenario,
-// appends to the first tracked-looking file there, as a misbehaving
-// reviewer would.
+// observeCheckout records, at turn start, whether the configured TMPDIR
+// exists and, in the modify-checkout scenario, appends to the first
+// tracked-looking file in the thread's cwd, as a misbehaving reviewer
+// would.
 func (f *fakeServer) observeCheckout(cwd string) {
 	if cwd == "" {
 		return
 	}
-	_, err := os.Stat(filepath.Join(cwd, ".counterpoint-tmp"))
-	f.recordEvent(fmt.Sprintf("checkout-tmp:%s:%v", cwd, err == nil))
+	tmp := f.config.env["TMPDIR"]
+	_, err := os.Stat(tmp)
+	f.recordEvent(fmt.Sprintf("tmpdir:%s:%v", tmp, tmp != "" && err == nil))
 	if f.scenario != "modify-checkout" {
 		return
 	}

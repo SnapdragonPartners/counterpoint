@@ -187,11 +187,13 @@ instead of the user's worktree:
    is created, and the review fails if it lies inside the repository's
    worktree or common Git directory or contains either, so scratch and cache
    can never land inside the reviewed repository.
-2. One directory per workflow key holds `checkout/`, recreated every round;
-   `cache/`, kept between rounds; and its own advisory lock, held from before
-   the checkout is replaced until after it is removed. The lock is keyed to
-   the directory rather than to the state file, because two installations
-   with different state files could share the default root.
+2. One directory per workflow key holds `checkout/` and `tmp/`, both
+   recreated every round; `cache/`, kept between rounds; and its own
+   advisory lock, held from before the checkout is replaced until after it
+   is removed. The lock is keyed to the directory rather than to the state
+   file, because two installations with different state files could share
+   the default root. The cache is checked for a symlink after creation,
+   since it persists and is handed to Codex as a writable root.
 3. The checkout is a shared, no-checkout clone of the repository's common
    directory with the commit checked out detached, populated with the user's
    global and system Git configuration ignored, no templates, and hooks
@@ -201,15 +203,17 @@ instead of the user's worktree:
    objects through an alternates link to the source object store and writes
    nothing into the source repository. A leftover checkout from a crashed
    round is replaced.
-4. `checkout/.counterpoint-tmp` is created for the reviewer's `TMPDIR`. A
-   commit that tracks that name is refused.
+4. `tmp/` is the reviewer's `TMPDIR`. It sits beside the checkout, not
+   inside it: a temp directory under a Git worktree is discovered as part
+   of that repository, which broke this project's own tests that expect a
+   directory outside any repository when the live spike ran them.
 5. After the turn, tracked files in the checkout are compared with the
    commit. Any change, whether a lockfile rewrite or an edit despite
    instructions, is reported in the response `warnings` because the
    reviewer's results may then not describe the commit. Untracked build
    output is expected.
-6. On every exit path the checkout and hooks directory are removed and the
-   cache is kept.
+6. On every exit path the checkout, temp, and hooks directories are removed
+   and the cache is kept.
 
 The clean-worktree requirement is unchanged. The reviewer no longer reads the
 user's checkout, so the author's only obligation during a build-capable
@@ -352,13 +356,13 @@ configuration Codex should never ask for additional access.
 
 A build-capable review uses the workspace-write sandbox instead, still with
 network access disabled, and passes configuration overrides on the child's
-command line: the workflow's cache directory as the single extra writable
-root, both implicit temp roots (`/tmp` and `$TMPDIR`) excluded so a
-repository under either stays read-only, and `TMPDIR` plus
+command line: the workflow's cache and temp directories as the only extra
+writable roots, both implicit temp roots (`/tmp` and `$TMPDIR`) excluded so
+a repository under either stays read-only, and `TMPDIR` plus
 `COUNTERPOINT_CACHE_DIR` set for the reviewer's commands through
 `shell_environment_policy`. The effective policy reported by the thread call
 must match exactly: type workspace-write, network off, both temp roots
-excluded, writable roots equal to that one directory, and the working
+excluded, writable roots equal to those two directories, and the working
 directory equal to the checkout. Anything else fails closed. Counterpoint
 sets no language-specific variables; the prompt recommends `GOCACHE` under
 the cache directory and `GOPROXY=off` as the Go example.
@@ -556,8 +560,10 @@ Unit tests cover:
   populating the checkout, with a fixture whose global configuration would
   run a post-checkout hook and a smudge filter; rejection of a scratch root
   overlapping the repository, of a symlinked workflow directory, and of a
-  commit tracking the temp directory name; lock contention on one workflow
-  directory; replacement of a crashed round's checkout; checkout removal on
+  cache directory replaced by a symlink between rounds; lock contention on
+  one workflow directory; replacement of a crashed round's checkout; the
+  temp directory created beside the checkout and removed with it; checkout
+  removal on
   a completed, failed, and cancelled review with the cache kept; and the
   warning for tracked files changed during the turn;
 - merge-base resolution against local and remote-tracking primary branches;

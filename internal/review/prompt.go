@@ -49,8 +49,8 @@ Your review is returned verbatim to the author, who will either fix findings in 
 `)
 	if p.Checkout != "" {
 		fmt.Fprintf(&b, `You are running non-interactively in a sandbox without network access.
-Your working directory, %s, is a disposable checkout of the commit under review, made for this round and deleted afterwards. You may build and run tests there; build output and temp files belong there, and test results from it are evidence you may cite.
-%s is the one writable location outside the checkout, kept between rounds for build caches. For Go, use GOCACHE=$%s/go-build GOPROXY=off so a missing module fails fast instead of hanging.
+Your working directory, %s, is a disposable checkout of the commit under review, made for this round and deleted afterwards. You may build and run tests there; build output belongs there, temp files go to $TMPDIR, and test results from it are evidence you may cite.
+%s is writable and kept between rounds for build caches. For Go, use GOCACHE=$%s/go-build GOPROXY=off so a missing module fails fast instead of hanging.
 Lint tooling is probably unavailable offline; if so, run the checks you can and report lint as not run.
 Do not modify tracked files in the checkout: the review must describe the commit, and any change is reported to the author.
 The original repository at %s is read-only and not the place to run anything.

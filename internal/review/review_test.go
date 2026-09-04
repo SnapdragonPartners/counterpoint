@@ -785,8 +785,8 @@ func TestBuildRoundRunsInADisposableCheckout(t *testing.T) {
 	var seenCwd string
 	h.reviewer.duringSetup = func(cwd string) {
 		seenCwd = cwd
-		if _, err := os.Stat(filepath.Join(cwd, scratch.TmpName)); err != nil {
-			t.Errorf("temp dir missing in the checkout while the thread exists: %v", err)
+		if _, err := os.Stat(filepath.Join(filepath.Dir(cwd), "tmp")); err != nil {
+			t.Errorf("temp dir missing beside the checkout while the thread exists: %v", err)
 		}
 		if head := gitIn(t, cwd, "rev-parse", "HEAD"); head != commit {
 			t.Errorf("checkout HEAD = %s, want %s", head, commit)
@@ -803,12 +803,16 @@ func TestBuildRoundRunsInADisposableCheckout(t *testing.T) {
 		t.Errorf("checkout %s still exists after the review: %v", seenCwd, err)
 	}
 	cacheDir := filepath.Join(filepath.Dir(seenCwd), "cache")
+	tmpDir := filepath.Join(filepath.Dir(seenCwd), "tmp")
 	if _, err := os.Stat(cacheDir); err != nil {
 		t.Errorf("cache dir %s missing after the review: %v", cacheDir, err)
 	}
+	if _, err := os.Stat(tmpDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("temp dir %s still exists after the review: %v", tmpDir, err)
+	}
 	sb := h.reviewer.sandboxes[0]
-	if !sb.Build || len(sb.WritableRoots) != 1 || sb.WritableRoots[0] != cacheDir {
-		t.Errorf("sandbox = %+v, want build with the cache dir as the only root", sb)
+	if !sb.Build || len(sb.WritableRoots) != 2 || sb.WritableRoots[0] != cacheDir || sb.WritableRoots[1] != tmpDir {
+		t.Errorf("sandbox = %+v, want build with the cache and temp dirs as the roots", sb)
 	}
 	args := strings.Join(h.reviewer.extraArgs[0], " ")
 	if !strings.Contains(args, "sandbox_workspace_write.writable_roots=[") || !strings.Contains(args, "TMPDIR=") {

@@ -9,6 +9,23 @@ this file keeps the reasoning and the rejected alternatives. Cache retention
 is tracked as
 [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
 
+## Changed after the live spike
+
+Two details differ from the plan below, both found by the first build-mode
+review of this branch, which ran the test suite on the exact commit:
+
+- The reviewer's temp directory is `<workflow>/tmp`, beside the checkout and
+  a second writable root, not `checkout/.counterpoint-tmp`. Go's per-test
+  temp directories under a Git worktree are discovered as part of that
+  repository, which broke tests expecting a directory outside any
+  repository. The tracked-name refusal went with it.
+- The persistent cache is checked for a symlink after creation, since it is
+  handed to Codex as a writable root and could be swapped between rounds.
+
+The live spike also showed that Codex's review mode starts each round with
+a fresh history, so cross-round context does not depend on the thread's cwd
+at all; that is tracked separately from this design.
+
 ## Goal
 
 Let the reviewer build and run the test suite on the exact commit under

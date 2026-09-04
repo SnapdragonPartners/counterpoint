@@ -32,11 +32,12 @@ const (
 	cacheName    = "cache"
 	hooksName    = "hooks"
 	lockName     = "lock"
-
-	// TmpName is the reviewer's temp directory inside the checkout. It is
-	// created by Prepare because setting TMPDIR does not create it, and a
-	// commit that tracks a path of this name is refused.
-	TmpName = ".counterpoint-tmp"
+	// tmpName is the reviewer's temp directory. It sits beside the
+	// checkout, not inside it: temp directories under a Git worktree are
+	// discovered as part of that repository, which breaks tests that expect
+	// a directory outside any repository. It is recreated every round and
+	// is the second writable root.
+	tmpName = "tmp"
 
 	dirPerm = 0o700
 	// keyHashLen is how many hex characters of the workflow key's hash name
@@ -47,7 +48,6 @@ const (
 // Sentinel errors.
 var (
 	ErrRootOverlapsRepository = errors.New("scratch root overlaps the reviewed repository")
-	ErrTmpPathTracked         = errors.New("the commit tracks the reviewer's temp directory name")
 	ErrUnexpectedSymlink      = errors.New("scratch path component is a symlink")
 )
 
@@ -86,10 +86,11 @@ type Options struct {
 type Checkout struct {
 	// Dir is the detached checkout of the commit: the reviewer's cwd.
 	Dir string
-	// CacheDir persists across rounds for build caches; it is the one
-	// writable location outside Dir.
+	// CacheDir persists across rounds for build caches. With TmpDir it is
+	// one of the two writable locations outside Dir.
 	CacheDir string
-	// TmpDir is the reviewer's TMPDIR, inside Dir.
+	// TmpDir is the reviewer's TMPDIR, beside Dir and recreated each
+	// round.
 	TmpDir string
 
 	workflowDir string
@@ -145,40 +146,40 @@ func Prepare(ctx context.Context, opts Options) (co *Checkout, err error) {
 	co = &Checkout{
 		Dir:         filepath.Join(workflowDir, checkoutName),
 		CacheDir:    filepath.Join(workflowDir, cacheName),
+		TmpDir:      filepath.Join(workflowDir, tmpName),
 		workflowDir: workflowDir,
 		hooksDir:    filepath.Join(workflowDir, hooksName),
 		lock:        lock,
 	}
-	co.TmpDir = filepath.Join(co.Dir, TmpName)
 	defer func() {
 		if err != nil {
 			_ = co.Close()
 		}
 	}()
 
-	// A leftover checkout is a crashed earlier round; replace it.
-	if err := co.removeOwned(co.Dir); err != nil {
-		return nil, err
-	}
-	if err := co.removeOwned(co.hooksDir); err != nil {
-		return nil, err
+	// Leftovers are a crashed earlier round; replace them.
+	for _, dir := range []string{co.Dir, co.hooksDir, co.TmpDir} {
+		if err := co.removeOwned(dir); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.Mkdir(co.hooksDir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create hooks dir: %w", err)
 	}
+	if err := os.Mkdir(co.TmpDir, dirPerm); err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	// The cache persists, so it may have been replaced meanwhile. It is
+	// handed to Codex as a writable root, and a symlink there would
+	// redirect the reviewer's writes outside this tree.
 	if err := os.MkdirAll(co.CacheDir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
-	if err := opts.Repo.CloneDetached(ctx, co.Dir, opts.Commit, co.hooksDir); err != nil {
+	if err := requireNotSymlink(co.CacheDir); err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(co.TmpDir); err == nil {
-		return nil, fmt.Errorf("%w: %s", ErrTmpPathTracked, TmpName)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect %s: %w", co.TmpDir, err)
-	}
-	if err := os.Mkdir(co.TmpDir, dirPerm); err != nil {
-		return nil, fmt.Errorf("create temp dir: %w", err)
+	if err := opts.Repo.CloneDetached(ctx, co.Dir, opts.Commit, co.hooksDir); err != nil {
+		return nil, err
 	}
 	return co, nil
 }
@@ -189,18 +190,17 @@ func (c *Checkout) ModifiedTrackedFiles(ctx context.Context) (int, error) {
 	return gitrepo.ModifiedTrackedFiles(ctx, c.Dir)
 }
 
-// Close removes the checkout and hooks directory, keeps the cache, and
-// releases the lock. It is safe to call more than once.
+// Close removes the checkout, temp, and hooks directories, keeps the
+// cache, and releases the lock. It is safe to call more than once.
 func (c *Checkout) Close() error {
 	if c == nil {
 		return nil
 	}
 	var errs []error
-	if err := c.removeOwned(c.Dir); err != nil {
-		errs = append(errs, err)
-	}
-	if err := c.removeOwned(c.hooksDir); err != nil {
-		errs = append(errs, err)
+	for _, dir := range []string{c.Dir, c.TmpDir, c.hooksDir} {
+		if err := c.removeOwned(dir); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if c.lock != nil {
 		if err := c.lock.Release(); err != nil {

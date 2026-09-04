@@ -785,13 +785,13 @@ func TestCheckSandboxRequiresTheExactRequestedPolicy(t *testing.T) {
 }
 
 func TestBuildConfigArgsQuoteTOMLStrings(t *testing.T) {
-	args := BuildConfigArgs(`/c/"quoted"\dir`, "/work/.counterpoint-tmp")
+	args := BuildConfigArgs(`/c/"quoted"\dir`, "/w/tmp")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		`sandbox_workspace_write.writable_roots=["/c/\"quoted\"\\dir"]`,
+		`sandbox_workspace_write.writable_roots=["/c/\"quoted\"\\dir","/w/tmp"]`,
 		"sandbox_workspace_write.exclude_slash_tmp=true",
 		"sandbox_workspace_write.exclude_tmpdir_env_var=true",
-		`shell_environment_policy.set.TMPDIR="/work/.counterpoint-tmp"`,
+		`shell_environment_policy.set.TMPDIR="/w/tmp"`,
 		`shell_environment_policy.set.COUNTERPOINT_CACHE_DIR="/c/\"quoted\"\\dir"`,
 	} {
 		if !strings.Contains(joined, want) {
@@ -840,8 +840,8 @@ func fakeClientArgs(t *testing.T, scenario string, extraArgs []string) *Client {
 }
 
 func TestWorkspaceWriteSessionIsValidatedAgainstTheEchoedPolicy(t *testing.T) {
-	build := Sandbox{Build: true, WritableRoots: []string{"/cache/dir"}}
-	args := BuildConfigArgs("/cache/dir", "/work/tree/.counterpoint-tmp")
+	build := Sandbox{Build: true, WritableRoots: []string{"/cache/dir", "/w/tmp"}}
+	args := BuildConfigArgs("/cache/dir", "/w/tmp")
 
 	cl := fakeClientArgs(t, "normal", args)
 	th, err := cl.StartThread(context.Background(), "/work/tree", build)

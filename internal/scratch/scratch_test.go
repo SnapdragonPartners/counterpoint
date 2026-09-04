@@ -28,9 +28,9 @@ func git(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// newRepo builds a repository with one commit on a feature branch and
-// returns it opened, with the commit id.
-func newRepo(t *testing.T, extraFiles map[string]string) (*gitrepo.Repository, string) {
+// newRepo builds a repository with one commit and returns it opened, with
+// the commit id.
+func newRepo(t *testing.T) (*gitrepo.Repository, string) {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -42,14 +42,6 @@ func newRepo(t *testing.T, extraFiles map[string]string) (*gitrepo.Repository, s
 	git(t, dir, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	for name, content := range extraFiles {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
 	}
 	git(t, dir, "add", "-A")
 	git(t, dir, "commit", "--quiet", "-m", "initial")
@@ -70,7 +62,7 @@ func newRoot(t *testing.T) string {
 }
 
 func TestPrepareCreatesCheckoutAndCloseRemovesIt(t *testing.T) {
-	repo, commit := newRepo(t, nil)
+	repo, commit := newRepo(t)
 	root := newRoot(t)
 	opts := Options{Root: root, WorkflowKey: repo.Identity() + "::refs/heads/main", Repo: repo, Commit: commit}
 	co, err := Prepare(context.Background(), opts)
@@ -86,6 +78,9 @@ func TestPrepareCreatesCheckoutAndCloseRemovesIt(t *testing.T) {
 	info, err := os.Stat(co.TmpDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
 		t.Errorf("temp dir = %v, %v; want a 0700 directory", info, err)
+	}
+	if filepath.Dir(co.TmpDir) != filepath.Dir(co.Dir) || strings.HasPrefix(co.TmpDir, co.Dir) {
+		t.Errorf("temp dir %s should sit beside the checkout %s, not inside it", co.TmpDir, co.Dir)
 	}
 	if f, err := os.CreateTemp(co.TmpDir, "probe"); err != nil {
 		t.Errorf("cannot create a temp file in %s: %v", co.TmpDir, err)
@@ -108,6 +103,9 @@ func TestPrepareCreatesCheckoutAndCloseRemovesIt(t *testing.T) {
 	if _, err := os.Stat(co.Dir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("checkout still present after Close: %v", err)
 	}
+	if _, err := os.Stat(co.TmpDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("temp dir still present after Close: %v", err)
+	}
 	if _, err := os.Stat(co.CacheDir); err != nil {
 		t.Errorf("cache removed by Close: %v", err)
 	}
@@ -123,7 +121,7 @@ func TestPrepareCreatesCheckoutAndCloseRemovesIt(t *testing.T) {
 }
 
 func TestPrepareReplacesACrashRemnant(t *testing.T) {
-	repo, commit := newRepo(t, nil)
+	repo, commit := newRepo(t)
 	opts := Options{Root: newRoot(t), WorkflowKey: "k", Repo: repo, Commit: commit}
 	co, err := Prepare(context.Background(), opts)
 	if err != nil {
@@ -152,7 +150,7 @@ func TestPrepareReplacesACrashRemnant(t *testing.T) {
 }
 
 func TestPrepareRejectsARootOverlappingTheRepository(t *testing.T) {
-	repo, commit := newRepo(t, nil)
+	repo, commit := newRepo(t)
 	cases := map[string]string{
 		"inside the worktree":                filepath.Join(repo.Worktree, "scratch"),
 		"nested and missing in the worktree": filepath.Join(repo.Worktree, "missing", "deeper", "scratch"),
@@ -180,7 +178,7 @@ func TestPrepareRejectsARootOverlappingTheRepository(t *testing.T) {
 }
 
 func TestPrepareResolvesAMissingRootThroughItsExistingAncestor(t *testing.T) {
-	repo, commit := newRepo(t, nil)
+	repo, commit := newRepo(t)
 	base := t.TempDir() // unresolved: a symlink on macOS
 	root := filepath.Join(base, "a", "b", "checkouts")
 	co, err := Prepare(context.Background(), Options{Root: root, WorkflowKey: "k", Repo: repo, Commit: commit})
@@ -202,7 +200,7 @@ func TestPrepareResolvesAMissingRootThroughItsExistingAncestor(t *testing.T) {
 }
 
 func TestPrepareRefusesASymlinkedWorkflowDir(t *testing.T) {
-	repo, commit := newRepo(t, nil)
+	repo, commit := newRepo(t)
 	root := newRoot(t)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -223,7 +221,7 @@ func TestPrepareRefusesASymlinkedWorkflowDir(t *testing.T) {
 }
 
 func TestPrepareFailsWhileAnotherHoldsTheWorkflowLock(t *testing.T) {
-	repo, commit := newRepo(t, nil)
+	repo, commit := newRepo(t)
 	opts := Options{Root: newRoot(t), WorkflowKey: "k", Repo: repo, Commit: commit, LockWait: 50 * time.Millisecond}
 	held, err := Prepare(context.Background(), opts)
 	if err != nil {
@@ -239,11 +237,30 @@ func TestPrepareFailsWhileAnotherHoldsTheWorkflowLock(t *testing.T) {
 	}
 }
 
-func TestPrepareRefusesACommitThatTracksTheTempName(t *testing.T) {
-	repo, commit := newRepo(t, map[string]string{TmpName + "/keep": "x"})
-	_, err := Prepare(context.Background(), Options{Root: newRoot(t), WorkflowKey: "k", Repo: repo, Commit: commit})
-	if !errors.Is(err, ErrTmpPathTracked) {
-		t.Fatalf("error = %v, want ErrTmpPathTracked", err)
+func TestPrepareRejectsASymlinkedCache(t *testing.T) {
+	repo, commit := newRepo(t)
+	opts := Options{Root: newRoot(t), WorkflowKey: "k", Repo: repo, Commit: commit}
+	co, err := Prepare(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = co.Close()
+	// Between rounds the persistent cache entry is swapped for a symlink.
+	elsewhere := t.TempDir()
+	if err := os.Remove(co.CacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, co.CacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(context.Background(), opts); !errors.Is(err, ErrUnexpectedSymlink) {
+		t.Fatalf("Prepare with a symlinked cache: error = %v, want ErrUnexpectedSymlink", err)
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("Prepare wrote through the cache symlink: %v", entries)
+	}
+	if _, err := os.Stat(co.Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused Prepare left a checkout behind: %v", err)
 	}
 }
 
