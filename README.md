@@ -127,6 +127,15 @@ unusual installations. Diagnostics go to stderr only.
 Prerequisites at review time: a clean worktree checked out at the tip of a
 non-primary branch, and a locally authenticated Codex CLI.
 
+## Operational notes
+
+- Leave the Codex review thread for a branch unarchived and closed. Opening it
+  in the Codex app while a review runs causes a writer conflict, and archiving
+  it prevents Counterpoint from resuming it.
+- After a resume, the app-server may omit the effective reasoning effort from
+  its response, so the log line for that round can show an empty effort even
+  though the process-level override is in force.
+
 ## Development
 
 ```bash
