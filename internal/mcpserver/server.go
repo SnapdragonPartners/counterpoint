@@ -42,7 +42,7 @@ type Input struct {
 	Repo        string `json:"repo" jsonschema:"Absolute path inside the Git worktree to review"`
 	Branch      string `json:"branch" jsonschema:"Local branch name, bare or as refs/heads/<name>; never the primary branch"`
 	Commit      string `json:"commit" jsonschema:"Commit to review; must be the branch tip and the checked-out HEAD of a clean worktree"`
-	BranchNotes string `json:"branch_notes" jsonschema:"Author-written handoff notes: what changed, verification, how prior findings were resolved, open questions"`
+	BranchNotes string `json:"branch_notes" jsonschema:"Author-written handoff notes (at most 1 MiB): what changed, verification, how prior findings were resolved, open questions"`
 }
 
 // Output is the review tool's structured result.
@@ -66,7 +66,8 @@ func New(lifecycle context.Context, svc *review.Service, version string, log *sl
 	mcp.AddTool(server, &mcp.Tool{
 		Name: ToolName,
 		Description: "Ask the persistent Codex reviewer for this repository and branch to review a local commit. " +
-			"Blocks until the review completes. Counterpoint never pushes, opens pull requests, merges, or edits the repository.",
+			"Blocks until the review completes: up to sixty seconds of setup plus a twenty-minute review turn. " +
+			"Counterpoint never pushes, opens pull requests, merges, or edits the repository.",
 	}, func(reqCtx context.Context, _ *mcp.CallToolRequest, in Input) (*mcp.CallToolResult, Output, error) {
 		ctx, cancel := context.WithCancel(reqCtx)
 		defer cancel()

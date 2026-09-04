@@ -78,13 +78,25 @@ reviewers, remote execution, push/PR automation, and a general workflow engine.
 
 ## Timeouts
 
-Each review is bounded by a fixed twenty-minute Counterpoint timeout. Claude
-Code separately aborts a stdio MCP tool call that has produced no response for
-thirty minutes by default, controlled by the
-`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. Keep
-that value above twenty minutes if you have lowered it. The per-call wall-clock
-limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`,
-defaults to many hours and normally needs no change.
+A review call is bounded by two fixed Counterpoint timeouts: sixty seconds for
+setup, which covers starting `codex app-server`, its handshake, and starting or
+resuming the thread, and then twenty minutes for the review turn itself. A call
+can therefore take up to twenty-one minutes. Claude Code separately aborts a
+stdio MCP tool call that has produced no response for thirty minutes by
+default, controlled by the `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment
+variable in milliseconds. Keep that value above twenty-one minutes if you have
+lowered it. The per-call wall-clock limit, `MCP_TOOL_TIMEOUT` or the per-server
+`timeout` field in `.mcp.json`, defaults to many hours and normally needs no
+change.
+
+## Limits
+
+- `branch_notes` may be at most 1 MiB; longer notes are rejected before any
+  work starts.
+- One MCP request line may be at most 6 MiB on the wire, enough for maximal
+  notes after JSON escaping; a longer or multi-line request ends the session.
+- Bridge warnings returned with a review are capped at 32 entries and 8 KiB,
+  with a final entry reporting how many were omitted.
 
 ## Installation and use
 

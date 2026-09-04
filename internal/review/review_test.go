@@ -408,8 +408,8 @@ func TestSetupTimeoutCoversThreadCalls(t *testing.T) {
 		if !errors.Is(err, ErrSetupTimeout) {
 			t.Fatalf("resume=%v: error = %v, want ErrSetupTimeout", resume, err)
 		}
-		if resume && !errors.Is(err, ErrThreadUnavailable) {
-			t.Errorf("resume=%v: error = %v, want ErrThreadUnavailable as well", resume, err)
+		if errors.Is(err, ErrThreadUnavailable) {
+			t.Errorf("resume=%v: error = %v; a transient setup timeout must not claim the thread is unavailable", resume, err)
 		}
 		if time.Since(start) > 5*time.Second {
 			t.Errorf("resume=%v: setup stall not bounded", resume)
