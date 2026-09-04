@@ -269,8 +269,14 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		}
 	}
 	cancelSetup()
+	// The configured effort is logged as the policy in force. The reported
+	// value is what thread/start or thread/resume echoed back; the schema
+	// makes it nullable and thread/resume has been observed to omit it
+	// (issue #7), so an empty reported_effort means "not reported", not
+	// "no effort".
 	s.log.Info("review turn starting", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
-		"model", thread.Model, "effort", thread.ReasoningEffort, "commit", target.Commit, "base", target.Base)
+		"model", thread.Model, "effort", ReasoningEffort, "reported_effort", thread.ReasoningEffort,
+		"commit", target.Commit, "base", target.Base)
 
 	turnCtx, cancel := context.WithTimeoutCause(ctx, s.timeout, ErrTimeout)
 	defer cancel()

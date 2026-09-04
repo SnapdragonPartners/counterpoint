@@ -132,9 +132,10 @@ non-primary branch, and a locally authenticated Codex CLI.
 - Leave the Codex review thread for a branch unarchived and closed. Opening it
   in the Codex app while a review runs causes a writer conflict, and archiving
   it prevents Counterpoint from resuming it.
-- After a resume, the app-server may omit the effective reasoning effort from
-  its response, so the log line for that round can show an empty effort even
-  though the process-level override is in force.
+- The "review turn starting" log line reports `effort`, the configured
+  override in force, alongside `reported_effort`, the value the app-server
+  echoed back. After a resume the app-server may omit that value, so an empty
+  `reported_effort` means it was not reported, not that no effort applied.
 
 ## Development
 
