@@ -138,7 +138,8 @@ func (r *Repository) requireCleanBounded(ctx context.Context, limit int) error {
 	lines := strings.Split(out, "\n")
 	summary := truncate(strings.Join(lines, "; "))
 	if truncated {
-		return fmt.Errorf("%w: more than %d entries (output truncated): %s", ErrDirtyWorktree, len(lines), summary)
+		// The count is unknown: the cut may fall inside the first entry.
+		return fmt.Errorf("%w: status output exceeded %d bytes (truncated); begins: %s", ErrDirtyWorktree, limit, summary)
 	}
 	return fmt.Errorf("%w: %d entries: %s", ErrDirtyWorktree, len(lines), summary)
 }

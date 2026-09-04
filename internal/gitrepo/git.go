@@ -36,8 +36,10 @@ const (
 var ErrOutputTooLarge = errors.New("git output exceeded the size limit")
 
 // gitEnvBlocklist names environment variables that would redirect Git away
-// from the directory passed with -C. They are removed so the supplied
-// repository path is authoritative.
+// from the directory passed with -C, plus the two variables cleanEnv pins.
+// They are removed so the supplied repository path is authoritative and the
+// pinned values are the only definitions, independent of how a platform
+// resolves duplicate keys.
 var gitEnvBlocklist = [...]string{ //nolint:gochecknoglobals // constant table
 	"GIT_DIR=",
 	"GIT_WORK_TREE=",
@@ -46,6 +48,8 @@ var gitEnvBlocklist = [...]string{ //nolint:gochecknoglobals // constant table
 	"GIT_OBJECT_DIRECTORY=",
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES=",
 	"GIT_NAMESPACE=",
+	"GIT_TERMINAL_PROMPT=",
+	"LC_ALL=",
 }
 
 // boundedBuffer retains at most limit bytes and records whether more were
@@ -136,8 +140,9 @@ func runBounded(ctx context.Context, dir string, stdoutLimit int, args ...string
 	return strings.TrimRight(stdout.String(), "\n"), stdout.overflow, nil
 }
 
-// cleanEnv drops blocklisted Git variables and pins prompts and locale so
-// output is stable and no invocation can wait on a terminal.
+// cleanEnv drops blocklisted variables and pins prompts off and the locale
+// to C so diagnostics are stable and no invocation can wait on a terminal.
+// The pinned keys are also blocklisted, so each appears exactly once.
 func cleanEnv(env []string) []string {
 	out := make([]string, 0, len(env)+2)
 	for _, kv := range env {

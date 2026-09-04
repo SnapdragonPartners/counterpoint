@@ -75,7 +75,7 @@ func TestRequireCleanTreatsTruncatedStatusAsDirty(t *testing.T) {
 	if !errors.Is(err, ErrDirtyWorktree) {
 		t.Fatalf("requireCleanBounded error = %v, want ErrDirtyWorktree", err)
 	}
-	if !strings.Contains(err.Error(), "truncated") {
+	if !strings.Contains(err.Error(), "truncated") || strings.Contains(err.Error(), "entries") {
 		t.Errorf("error %q should say the output was truncated", err)
 	}
 }

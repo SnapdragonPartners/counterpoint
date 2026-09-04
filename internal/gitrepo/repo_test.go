@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -115,23 +117,29 @@ func TestWorkflowKey(t *testing.T) {
 }
 
 func TestCleanEnvStripsRedirectingVariables(t *testing.T) {
-	env := cleanEnv([]string{"GIT_DIR=/elsewhere", "PATH=/bin", "GIT_WORK_TREE=/x", "HOME=/h"})
+	env := cleanEnv([]string{
+		"GIT_DIR=/elsewhere", "PATH=/bin", "GIT_WORK_TREE=/x", "HOME=/h",
+		"LC_ALL=en_US.UTF-8", "GIT_TERMINAL_PROMPT=1",
+	})
+	counts := map[string]int{}
 	for _, kv := range env {
 		if kv == "GIT_DIR=/elsewhere" || kv == "GIT_WORK_TREE=/x" {
 			t.Errorf("cleanEnv kept %q", kv)
 		}
+		key, _, _ := strings.Cut(kv, "=")
+		counts[key]++
 	}
-	var sawPrompt, sawLocale bool
-	for _, kv := range env {
-		switch kv {
-		case "GIT_TERMINAL_PROMPT=0":
-			sawPrompt = true
-		case "LC_ALL=C":
-			sawLocale = true
+	for _, want := range []string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("cleanEnv = %v, missing %q", env, want)
 		}
 	}
-	if !sawPrompt || !sawLocale {
-		t.Errorf("cleanEnv = %v, want prompt and locale pins", env)
+	// The pinned keys must be the only definitions so the values do not
+	// depend on how the platform resolves duplicate environment keys.
+	for _, key := range []string{"LC_ALL", "GIT_TERMINAL_PROMPT"} {
+		if counts[key] != 1 {
+			t.Errorf("cleanEnv defines %s %d times, want exactly once: %v", key, counts[key], env)
+		}
 	}
 }
 
