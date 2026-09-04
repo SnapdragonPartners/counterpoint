@@ -16,8 +16,10 @@ build:
 
 # The installed binary is the stable tool MCP clients run; bin/counterpoint is
 # the build under test. Installing promotes deliberately. GOBIN when set,
-# otherwise GOPATH/bin, which is the conventional PATH entry for Go tools.
-INSTALL_DIR ?= $(or $(shell go env GOBIN),$(shell go env GOPATH)/bin)
+# otherwise the first GOPATH entry's bin, which is where go install puts
+# binaries and the conventional PATH entry for Go tools. GOPATH may be a
+# colon-separated list; this Makefile already assumes a POSIX shell.
+INSTALL_DIR ?= $(or $(shell go env GOBIN),$(shell go env GOPATH | cut -d: -f1)/bin)
 
 install:
 	go build -ldflags "$(LDFLAGS)" -o "$(INSTALL_DIR)/counterpoint" ./cmd/counterpoint
