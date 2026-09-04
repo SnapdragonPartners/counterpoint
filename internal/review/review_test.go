@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type fakeReviewer struct {
 	reviewStarted chan struct{}
 	startOnce     sync.Once
 	stallSetup    bool // StartThread and ResumeThread block until ctx ends
+	omitEffort    bool // ResumeThread reports no reasoning effort, as codex-cli 0.153.1 does
 	warnings      []string
 }
 
@@ -58,7 +60,11 @@ func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appser
 		return appserver.Thread{}, f.resumeErr
 	}
 	f.resumed = append(f.resumed, id+"@"+cwd)
-	return appserver.Thread{ID: id, Model: "fake", ReasoningEffort: "xhigh"}, nil
+	th := appserver.Thread{ID: id, Model: "fake", ReasoningEffort: "xhigh"}
+	if f.omitEffort {
+		th.ReasoningEffort = ""
+	}
+	return th, nil
 }
 
 func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string) (*appserver.Review, error) {
@@ -200,6 +206,44 @@ func TestSecondRoundResumesThreadAndNamesPreviousTip(t *testing.T) {
 	instr := h.reviewer.instructions[1]
 	if !strings.Contains(instr, "previously reviewed tip was "+first) || !strings.Contains(instr, "git diff "+first+" "+second) {
 		t.Errorf("round two instructions lack the previous tip delta:\n%s", instr)
+	}
+}
+
+// A resumed round whose thread/resume response omits reasoningEffort must
+// still log the configured effort in force, and must label the missing
+// value as unreported rather than presenting it as the effort (issue #7).
+func TestResumedRoundLogsConfiguredEffortWhenUnreported(t *testing.T) {
+	h := newHarness(t)
+	first := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	second := h.repo.commit("feature-2")
+
+	var logs bytes.Buffer
+	h.reviewer.omitEffort = true
+	restarted := New(Options{
+		Store:       state.NewStore(h.store.Path()),
+		Logger:      slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		NewReviewer: func(context.Context) (Reviewer, error) { return h.reviewer, nil },
+	})
+	if _, err := restarted.Review(context.Background(), h.request(second, "r2")); err != nil {
+		t.Fatalf("second round: %v", err)
+	}
+	var starting string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, `msg="review turn starting"`) && strings.Contains(line, "round=2") {
+			starting = line
+		}
+	}
+	if starting == "" {
+		t.Fatalf("no round-two start line in logs:\n%s", logs.String())
+	}
+	if !strings.Contains(starting, "effort="+ReasoningEffort+" ") {
+		t.Errorf("configured effort %q missing from: %s", ReasoningEffort, starting)
+	}
+	if !strings.Contains(starting, `reported_effort="" `) {
+		t.Errorf("omitted effort not labelled as unreported in: %s", starting)
 	}
 }
 

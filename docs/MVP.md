@@ -299,7 +299,9 @@ delegation that a reviewer should not adopt implicitly. Changing the constant
 is a one-line edit; selecting a level per model from the catalog is deferred.
 
 The effective model and effort reported by `thread/start` or `thread/resume`
-are logged. If the configured model does not accept the constant, the review
+are logged alongside the configured effort, because the reported effort is
+nullable in the protocol and `thread/resume` has been observed to omit it
+while the configured override remained in force. If the configured model does not accept the constant, the review
 fails with the app-server's error rather than retrying at a lower level. Model
 selection and per-repository effort settings are deferred.
 
