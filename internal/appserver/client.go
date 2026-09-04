@@ -37,6 +37,9 @@ var (
 	ErrTurnFailed      = errors.New("review turn failed")
 	ErrTurnInterrupted = errors.New("review turn interrupted")
 	ErrNoReviewText    = errors.New("review turn completed without review text")
+	ErrReviewTooLarge  = errors.New("review text exceeds the size limit")
+	ErrIncompatible    = errors.New("app-server response is incompatible with the expected protocol")
+	ErrPolicyMismatch  = errors.New("app-server did not apply the read-only, no-approval policy")
 )
 
 // Options configures Start.
@@ -106,11 +109,17 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	cl := &Client{c: c, log: log}
 
 	params := initializeParams{ClientInfo: clientInfo{Name: clientName, Version: opts.Version}}
-	if err := c.call(ctx, methodInitialize, params, nil); err != nil {
+	var resp initializeResponse
+	if err := c.call(ctx, methodInitialize, params, &resp); err != nil {
 		cl.Close()
 		return nil, fmt.Errorf("app-server handshake: %w", err)
 	}
-	if err := c.notify(methodInitialized, nil); err != nil {
+	if resp.CodexHome == "" || resp.PlatformFamily == "" || resp.PlatformOS == "" || resp.UserAgent == "" {
+		cl.Close()
+		return nil, fmt.Errorf("app-server handshake: %w: initialize response lacks required fields", ErrIncompatible)
+	}
+	log.Info("app-server ready", "userAgent", resp.UserAgent, "platform", resp.PlatformOS)
+	if err := c.notify(ctx, methodInitialized, nil); err != nil {
 		cl.Close()
 		return nil, fmt.Errorf("app-server handshake: %w", err)
 	}
@@ -140,9 +149,19 @@ func (cl *Client) ResumeThread(ctx context.Context, threadID, cwd string) (Threa
 	return threadFromResponse(resp)
 }
 
+// threadFromResponse validates the effective policy the server reports and
+// fails closed unless it is the read-only sandbox without network access
+// and the never approval policy.
 func threadFromResponse(resp threadResponse) (Thread, error) {
 	if resp.Thread.ID == "" {
-		return Thread{}, errors.New("app-server returned a thread without an id")
+		return Thread{}, fmt.Errorf("%w: thread response has no id", ErrIncompatible)
+	}
+	var approval string
+	if err := json.Unmarshal(resp.ApprovalPolicy, &approval); err != nil || approval != approvalNever {
+		return Thread{}, fmt.Errorf("%w: effective approval policy is %s", ErrPolicyMismatch, string(resp.ApprovalPolicy))
+	}
+	if resp.Sandbox.Type != sandboxPolicyReadOnly || resp.Sandbox.NetworkAccess {
+		return Thread{}, fmt.Errorf("%w: effective sandbox is %q with networkAccess=%v", ErrPolicyMismatch, resp.Sandbox.Type, resp.Sandbox.NetworkAccess)
 	}
 	t := Thread{ID: resp.Thread.ID, Model: resp.Model}
 	if resp.ReasoningEffort != nil {
@@ -190,9 +209,9 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 	warnings := cl.c.takeWarnings()
 	switch final.status {
 	case turnStatusCompleted:
-		text := final.text()
-		if text == "" {
-			return nil, ErrNoReviewText
+		text, err := final.text()
+		if err != nil {
+			return nil, err
 		}
 		return &Review{TurnID: resp.Turn.ID, Text: text, Warnings: warnings}, nil
 	case turnStatusFailed:
@@ -336,6 +355,7 @@ type turnResult struct {
 	review   string
 	messages string
 	deltas   string
+	overflow bool
 	turnErr  *turnError
 	lastErr  *turnError
 }
@@ -348,31 +368,75 @@ func (w *turnWatcher) result() turnResult {
 		review:   w.review,
 		messages: w.messages.String(),
 		deltas:   w.deltas.String(),
+		overflow: w.overflow,
 		turnErr:  w.turnErr,
 		lastErr:  w.lastErr,
 	}
 }
 
-func (r turnResult) text() string {
-	switch {
-	case r.review != "":
-		return r.review
-	case r.messages != "":
-		return r.messages
-	default:
-		return r.deltas
+// text selects the review text. The review item is a single bounded
+// message and is always complete. The fallbacks are aggregates; when they
+// overflowed, a truncated prefix must not be returned as a review.
+func (r turnResult) text() (string, error) {
+	if r.review != "" {
+		return r.review, nil
 	}
+	if r.overflow {
+		return "", fmt.Errorf("%w: accumulated output exceeded %d bytes", ErrReviewTooLarge, maxCollectedText)
+	}
+	if r.messages != "" {
+		return r.messages, nil
+	}
+	if r.deltas != "" {
+		return r.deltas, nil
+	}
+	return "", ErrNoReviewText
 }
 
+// errorMessage describes a failed turn, including the Codex error code when
+// the server supplied one.
 func (r turnResult) errorMessage() string {
-	switch {
-	case r.turnErr != nil && r.turnErr.Message != "":
-		return r.turnErr.Message
-	case r.lastErr != nil && r.lastErr.Message != "":
-		return r.lastErr.Message
-	default:
+	e := r.turnErr
+	if e == nil || e.Message == "" {
+		e = r.lastErr
+	}
+	if e == nil {
 		return "no error details"
 	}
+	msg := e.Message
+	if msg == "" {
+		msg = "no error details"
+	}
+	if code := codexErrorCode(e.CodexErrorInfo); code != "" {
+		msg += " (codex error: " + code + ")"
+	}
+	return msg
+}
+
+// codexErrorCode renders the schema's codexErrorInfo, which is either a
+// bare code string or an object with one variant key that may carry an
+// HTTP status, as a short bounded diagnostic.
+func codexErrorCode(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var code string
+	if json.Unmarshal(raw, &code) == nil {
+		return code
+	}
+	var variant map[string]struct {
+		HTTPStatusCode *int `json:"httpStatusCode"`
+	}
+	if json.Unmarshal(raw, &variant) != nil || len(variant) == 0 {
+		return "unrecognized"
+	}
+	for name, v := range variant {
+		if v.HTTPStatusCode != nil {
+			return fmt.Sprintf("%s, http %d", name, *v.HTTPStatusCode)
+		}
+		return name
+	}
+	return "unrecognized"
 }
 
 func unmarshal(data []byte, v any) bool {

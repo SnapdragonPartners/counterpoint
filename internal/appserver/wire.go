@@ -65,12 +65,13 @@ const (
 
 // Protocol values.
 const (
-	sandboxReadOnly      = "read-only"
-	approvalNever        = "never"
-	reviewDeliveryInline = "inline"
-	reviewTargetCustom   = "custom"
-	decisionDecline      = "decline"
-	legacyDecisionDenied = "denied"
+	sandboxReadOnly       = "read-only"
+	sandboxPolicyReadOnly = "readOnly"
+	approvalNever         = "never"
+	reviewDeliveryInline  = "inline"
+	reviewTargetCustom    = "custom"
+	decisionDecline       = "decline"
+	legacyDecisionDenied  = "denied"
 
 	turnStatusCompleted   = "completed"
 	turnStatusFailed      = "failed"
@@ -105,13 +106,31 @@ type threadResumeParams struct {
 	ApprovalPolicy string `json:"approvalPolicy"`
 }
 
-// threadResponse covers both thread/start and thread/resume responses.
+// initializeResponse carries the fields the schema requires; an
+// incompatible server is detected by their absence.
+type initializeResponse struct {
+	CodexHome      string `json:"codexHome"`
+	PlatformFamily string `json:"platformFamily"`
+	PlatformOS     string `json:"platformOs"`
+	UserAgent      string `json:"userAgent"`
+}
+
+// threadResponse covers both thread/start and thread/resume responses,
+// including the effective policy the server reports back.
 type threadResponse struct {
 	Thread struct {
 		ID string `json:"id"`
 	} `json:"thread"`
-	Model           string  `json:"model"`
-	ReasoningEffort *string `json:"reasoningEffort"`
+	Model           string          `json:"model"`
+	ReasoningEffort *string         `json:"reasoningEffort"`
+	ApprovalPolicy  json.RawMessage `json:"approvalPolicy"`
+	Sandbox         sandboxPolicy   `json:"sandbox"`
+}
+
+// sandboxPolicy is the effective sandbox reported on thread responses.
+type sandboxPolicy struct {
+	Type          string `json:"type"`
+	NetworkAccess bool   `json:"networkAccess"`
 }
 
 type reviewStartParams struct {
@@ -185,6 +204,5 @@ type errorNotification struct {
 type serverRequestParams struct {
 	ThreadID string `json:"threadId"`
 	TurnID   string `json:"turnId"`
-	Command  string `json:"command"`
-	Reason   string `json:"reason"`
+	ItemID   string `json:"itemId"`
 }

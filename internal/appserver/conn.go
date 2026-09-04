@@ -25,8 +25,10 @@ const (
 	// stdin is closed before killing it.
 	closeGrace = 5 * time.Second
 
-	// maxWarningDetail bounds how much of a declined request is quoted.
-	maxWarningDetail = 200
+	// outboxSize bounds messages queued for the writer goroutine. A child
+	// that stops reading stdin fills the queue; callers then fail through
+	// their contexts instead of blocking on the pipe.
+	outboxSize = 64
 )
 
 // Sentinel errors for the transport.
@@ -34,6 +36,7 @@ var (
 	ErrProcessExited   = errors.New("app-server process exited")
 	ErrMessageTooLarge = errors.New("app-server message exceeds the size limit")
 	ErrClosed          = errors.New("app-server client is closed")
+	ErrWriteBacklog    = errors.New("app-server is not reading its input")
 )
 
 // notificationHandler receives every notification; it must return quickly
@@ -46,7 +49,10 @@ type conn struct {
 	stdin io.WriteCloser
 	log   *slog.Logger
 
-	writeMu sync.Mutex
+	// outbox feeds the single writer goroutine; writerDone closes when it
+	// exits.
+	outbox     chan []byte
+	writerDone chan struct{}
 
 	nextID atomic.Int64
 
@@ -55,16 +61,16 @@ type conn struct {
 	handlers map[int64]notificationHandler
 	nextHnd  int64
 	warnings []string
+	exitErr  error
 
-	// closed is closed when the reader loop ends; exitErr says why.
-	closed  chan struct{}
-	exitErr error
-	// waitDone is closed once cmd.Wait has returned.
+	// closed is closed when the reader has drained stdout to EOF and every
+	// pending call has been failed. The process is reaped only after that,
+	// as StdoutPipe requires, and waitDone then closes.
+	closed   chan struct{}
 	waitDone chan struct{}
-	waitErr  error
 }
 
-// spawn starts the child process and its reader goroutine.
+// spawn starts the child process and its reader and writer goroutines.
 func spawn(ctx context.Context, command string, args []string, stderr io.Writer, log *slog.Logger) (*conn, error) {
 	cmd := exec.CommandContext(ctx, command, args...) //nolint:gosec // argument array from configuration; never a shell
 	cmd.Stderr = stderr
@@ -81,30 +87,29 @@ func spawn(ctx context.Context, command string, args []string, stderr io.Writer,
 	}
 
 	c := &conn{
-		cmd:      cmd,
-		stdin:    stdin,
-		log:      log,
-		pending:  map[int64]chan envelope{},
-		handlers: map[int64]notificationHandler{},
-		closed:   make(chan struct{}),
-		waitDone: make(chan struct{}),
+		cmd:        cmd,
+		stdin:      stdin,
+		log:        log,
+		outbox:     make(chan []byte, outboxSize),
+		writerDone: make(chan struct{}),
+		pending:    map[int64]chan envelope{},
+		handlers:   map[int64]notificationHandler{},
+		closed:     make(chan struct{}),
+		waitDone:   make(chan struct{}),
 	}
+	go c.writeLoop()
 	go c.readLoop(stdout)
-	go func() {
-		c.waitErr = cmd.Wait()
-		close(c.waitDone)
-	}()
 	return c, nil
 }
 
 // readLoop is the single stdout reader. It dispatches responses to pending
 // calls, notifications to handlers, and server-originated requests to the
-// decline handler. When it ends, every pending call fails.
+// decline handler. It drains stdout to EOF before the process is reaped so
+// no final notification is lost, then fails every pending call.
 func (c *conn) readLoop(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxMessageSize)
 
-	var err error
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(strings.TrimSpace(string(line))) == 0 {
@@ -117,16 +122,42 @@ func (c *conn) readLoop(stdout io.Reader) {
 		}
 		c.dispatch(&env)
 	}
-	if serr := scanner.Err(); serr != nil {
-		if errors.Is(serr, bufio.ErrTooLong) {
-			err = ErrMessageTooLarge
-		} else {
-			err = fmt.Errorf("read app-server stdout: %w", serr)
-		}
-	} else {
+
+	var err error
+	switch serr := scanner.Err(); {
+	case serr == nil:
 		err = ErrProcessExited
+	case errors.Is(serr, bufio.ErrTooLong):
+		err = ErrMessageTooLarge
+	default:
+		err = fmt.Errorf("read app-server stdout: %w", serr)
 	}
 	c.shutdown(err)
+
+	// Reap only after stdout is drained: cmd.Wait closes the read end of
+	// the stdout pipe, so calling it earlier could discard final bytes the
+	// child wrote just before exiting. This ordering is the guarantee; the
+	// exit-after-completion test exercises it but, being a race, cannot
+	// prove it. An oversized line leaves the pipe unread; the child must
+	// be ended before Wait can return.
+	if !errors.Is(err, ErrProcessExited) {
+		_ = c.cmd.Process.Kill()
+	}
+	_ = c.cmd.Wait()
+	close(c.waitDone)
+}
+
+// writeLoop is the single stdin writer. A blocked pipe blocks only this
+// goroutine; callers wait on their own contexts. It exits when the outbox
+// is closed, when a write fails, or when stdin is closed by close.
+func (c *conn) writeLoop() {
+	defer close(c.writerDone)
+	for data := range c.outbox {
+		if _, err := c.stdin.Write(data); err != nil {
+			c.log.Warn("app-server: write failed", "error", err)
+			return
+		}
+	}
 }
 
 func (c *conn) dispatch(env *envelope) {
@@ -179,18 +210,13 @@ func (c *conn) shutdown(err error) {
 // call sends a request and waits for its response, honoring ctx and the
 // process lifetime. result may be nil to discard the result.
 func (c *conn) call(ctx context.Context, method string, params, result any) error {
-	select {
-	case <-c.closed:
-		return c.closedErr()
-	default:
-	}
 	id := c.nextID.Add(1)
 	ch := make(chan envelope, 1)
 	c.mu.Lock()
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if err := c.write(map[string]any{"id": id, "method": method, "params": params}); err != nil {
+	if err := c.send(ctx, map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -224,34 +250,66 @@ func (c *conn) call(ctx context.Context, method string, params, result any) erro
 }
 
 // notify sends a notification.
-func (c *conn) notify(method string, params any) error {
+func (c *conn) notify(ctx context.Context, method string, params any) error {
 	msg := map[string]any{"method": method}
 	if params != nil {
 		msg["params"] = params
 	}
-	if err := c.write(msg); err != nil {
+	if err := c.send(ctx, msg); err != nil {
 		return fmt.Errorf("%s: %w", method, err)
 	}
 	return nil
 }
 
-// write serializes one message as a single line. Writes are serialized so
-// lines never interleave.
-func (c *conn) write(msg any) error {
+// send encodes one message as a single line and queues it for the writer,
+// giving up when ctx ends or the connection closes.
+func (c *conn) send(ctx context.Context, msg any) error {
+	data, err := encodeLine(msg)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-c.closed:
+		return c.closedErr()
+	default:
+	}
+	select {
+	case c.outbox <- data:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return c.closedErr()
+	case <-c.writerDone:
+		return ErrClosed
+	}
+}
+
+// sendFromReader queues a message without ever blocking the reader
+// goroutine. When the outbox is full the child is not consuming input, so
+// the message is dropped with a warning rather than stalling dispatch.
+func (c *conn) sendFromReader(msg any) {
+	data, err := encodeLine(msg)
+	if err != nil {
+		c.log.Warn("app-server: cannot encode response to server request", "error", err)
+		return
+	}
+	select {
+	case c.outbox <- data:
+	default:
+		c.log.Warn("app-server: dropped response to server request", "error", ErrWriteBacklog)
+	}
+}
+
+func encodeLine(msg any) ([]byte, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("encode message: %w", err)
+		return nil, fmt.Errorf("encode message: %w", err)
 	}
 	if len(data)+1 > MaxMessageSize {
-		return ErrMessageTooLarge
+		return nil, ErrMessageTooLarge
 	}
-	data = append(data, '\n')
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if _, err := c.stdin.Write(data); err != nil {
-		return fmt.Errorf("write to app-server: %w", err)
-	}
-	return nil
+	return append(data, '\n'), nil
 }
 
 func (c *conn) closedErr() error {
@@ -277,9 +335,14 @@ func (c *conn) subscribe(h notificationHandler) func() {
 	}
 }
 
+// legacyRejection is the reason given on the legacy approval methods.
+const legacyRejection = "Counterpoint reviews in read-only mode and never grants execution or write approval"
+
 // handleServerRequest answers a server-originated request with a bounded
 // decline. With a read-only sandbox and approval policy never these should
-// not occur; each one is recorded as a warning for the caller.
+// not occur; each one is recorded as a warning for the caller. Warnings and
+// logs carry the request kind and identifiers only: a command or reason
+// supplied by the app-server may contain secrets or model output.
 func (c *conn) handleServerRequest(env *envelope) {
 	var p serverRequestParams
 	_ = json.Unmarshal(env.Params, &p)
@@ -289,38 +352,33 @@ func (c *conn) handleServerRequest(env *envelope) {
 	case requestCommandApproval, requestFileChangeApproval:
 		result = map[string]string{"decision": decisionDecline}
 	case requestLegacyExecApproval, requestLegacyPatchApproval:
-		result = map[string]string{"decision": legacyDecisionDenied}
+		result = map[string]any{"decision": map[string]any{"denied": map[string]string{"rejection": legacyRejection}}}
 	case requestPermissions:
 		result = map[string]any{"permissions": map[string]any{}}
 	case requestUserInput:
 		result = map[string]any{"answers": map[string]any{}}
 	default:
-		c.addWarning(fmt.Sprintf("rejected unsupported app-server request %s", env.Method))
-		c.respond(env.ID, nil, &rpcError{Code: codeMethodNotFound, Message: "unsupported request: " + env.Method})
+		c.addWarning(fmt.Sprintf("rejected unsupported app-server request %s%s", env.Method, identifiers(p)))
+		c.sendFromReader(map[string]any{"id": env.ID, "error": &rpcError{Code: codeMethodNotFound, Message: "unsupported request: " + env.Method}})
 		return
 	}
-
-	detail := p.Command
-	if detail == "" {
-		detail = p.Reason
-	}
-	if detail != "" {
-		detail = ": " + truncateDetail(detail)
-	}
-	c.addWarning(fmt.Sprintf("declined app-server request %s%s", env.Method, detail))
-	c.respond(env.ID, result, nil)
+	c.addWarning(fmt.Sprintf("declined app-server request %s%s", env.Method, identifiers(p)))
+	c.sendFromReader(map[string]any{"id": env.ID, "result": result})
 }
 
-func (c *conn) respond(id json.RawMessage, result any, rpcErr *rpcError) {
-	msg := map[string]any{"id": id}
-	if rpcErr != nil {
-		msg["error"] = rpcErr
-	} else {
-		msg["result"] = result
+// identifiers formats the request's item and turn ids for a warning.
+func identifiers(p serverRequestParams) string {
+	var parts []string
+	if p.ItemID != "" {
+		parts = append(parts, "item "+p.ItemID)
 	}
-	if err := c.write(msg); err != nil {
-		c.log.Warn("app-server: failed to answer server request", "error", err)
+	if p.TurnID != "" {
+		parts = append(parts, "turn "+p.TurnID)
 	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 func (c *conn) addWarning(w string) {
@@ -339,16 +397,9 @@ func (c *conn) takeWarnings() []string {
 	return w
 }
 
-func truncateDetail(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > maxWarningDetail {
-		return s[:maxWarningDetail] + "..."
-	}
-	return s
-}
-
-// close ends the child: stdin is closed, the process gets closeGrace to
-// exit, then it is killed. It always waits for the process to be reaped.
+// close ends the child. Stdin is closed so a well-behaved child exits and
+// a writer blocked on a full pipe is released; after closeGrace the child
+// is killed. It returns once stdout is drained and the process is reaped.
 func (c *conn) close() {
 	_ = c.stdin.Close()
 	select {
@@ -357,5 +408,4 @@ func (c *conn) close() {
 		_ = c.cmd.Process.Kill()
 		<-c.waitDone
 	}
-	<-c.closed
 }

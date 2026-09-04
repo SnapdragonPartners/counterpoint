@@ -157,7 +157,7 @@ func TestResumeAcrossProcessRestart(t *testing.T) {
 }
 
 func TestServerRequestsAreDeclinedAndReported(t *testing.T) {
-	cl, _ := fakeClient(t, "approval", "")
+	cl, stderr := fakeClient(t, "approval", "")
 	th := startThread(t, cl)
 	rev, err := cl.Review(context.Background(), th.ID, "x")
 	if err != nil {
@@ -167,10 +167,15 @@ func TestServerRequestsAreDeclinedAndReported(t *testing.T) {
 		t.Fatalf("Warnings = %v, want 6 entries", rev.Warnings)
 	}
 	joined := strings.Join(rev.Warnings, "\n")
-	for _, want := range []string{requestCommandApproval, "rm -rf /", requestFileChangeApproval, requestPermissions, requestUserInput, requestLegacyExecApproval, "item/weird/request"} {
+	for _, want := range []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput", "execCommandApproval", "item/weird/request", "item c1"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("warnings lack %q:\n%s", want, joined)
 		}
+	}
+	// Command text supplied by the app-server may hold secrets or model
+	// output and must not be copied into warnings or logs.
+	if strings.Contains(joined, "rm -rf") || strings.Contains(stderr.String(), "rm -rf") {
+		t.Errorf("warnings or logs quote the requested command:\n%s", joined)
 	}
 	if strings.Contains(rev.Text, "declined") {
 		t.Error("warnings were spliced into the review text")
@@ -181,8 +186,8 @@ func TestFailedTurn(t *testing.T) {
 	cl, _ := fakeClient(t, "fail", "")
 	th := startThread(t, cl)
 	_, err := cl.Review(context.Background(), th.ID, "x")
-	if !errors.Is(err, ErrTurnFailed) || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("Review error = %v, want ErrTurnFailed with boom", err)
+	if !errors.Is(err, ErrTurnFailed) || !strings.Contains(err.Error(), "boom") || !strings.Contains(err.Error(), "codex error: other") {
+		t.Fatalf("Review error = %v, want ErrTurnFailed with boom and the codex error code", err)
 	}
 }
 
@@ -321,4 +326,98 @@ func TestCloseKillsLingeringChild(t *testing.T) {
 		t.Errorf("Close took %v, want about closeGrace then kill", elapsed)
 	}
 	cl.Close() // second call is a no-op
+}
+
+func TestChildExitingRightAfterCompletionLosesNothing(t *testing.T) {
+	// The terminal event and the review item are the last bytes the child
+	// writes before exiting; they must be read before the process is
+	// reaped. The failure mode is a race, so this test is probabilistic:
+	// it repeats with a large final burst but cannot prove the ordering.
+	// The guarantee itself is by construction in conn.readLoop.
+	for i := 0; i < 10; i++ {
+		cl, _ := fakeClient(t, "exit-after-complete", "")
+		th := startThread(t, cl)
+		rev, err := cl.Review(context.Background(), th.ID, "x")
+		if err != nil {
+			t.Fatalf("iteration %d: Review: %v", i, err)
+		}
+		if !strings.HasPrefix(rev.Text, "REVIEW for ") {
+			t.Fatalf("iteration %d: Text = %q", i, rev.Text)
+		}
+		cl.Close()
+	}
+}
+
+func TestWritesAreCancellableWhenChildStopsReading(t *testing.T) {
+	cl, _ := fakeClient(t, "deaf", "")
+	startThread(t, cl) // after this the child never reads stdin again
+
+	// Enough to fill the pipe so the write itself blocks.
+	instructions := strings.Repeat("i", 4<<20)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cl.Review(ctx, "thr_1", instructions)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Review error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Review blocked on a write the child never consumes")
+	}
+
+	// Close must still complete: it releases the blocked writer and kills
+	// the child after the grace period.
+	start := time.Now()
+	cl.Close()
+	if elapsed := time.Since(start); elapsed > closeGrace+3*time.Second {
+		t.Errorf("Close took %v", elapsed)
+	}
+}
+
+func TestIncompatibleInitializeIsRejected(t *testing.T) {
+	t.Setenv(fakeEnv, "bad-init-shape")
+	t.Setenv(fakeStateEnv, "")
+	_, err := Start(context.Background(), Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
+	if !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("Start error = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestEffectivePolicyMismatchFailsClosed(t *testing.T) {
+	cl, _ := fakeClient(t, "wrong-policy", "")
+	_, err := cl.StartThread(context.Background(), "/work/tree")
+	if !errors.Is(err, ErrPolicyMismatch) {
+		t.Fatalf("StartThread error = %v, want ErrPolicyMismatch", err)
+	}
+}
+
+func TestAggregateOverflowIsAnError(t *testing.T) {
+	cl, _ := fakeClient(t, "aggregate-overflow", "")
+	th := startThread(t, cl)
+	_, err := cl.Review(context.Background(), th.ID, "x")
+	if !errors.Is(err, ErrReviewTooLarge) {
+		t.Fatalf("Review error = %v, want ErrReviewTooLarge", err)
+	}
+}
+
+func TestCodexErrorCodeRendering(t *testing.T) {
+	cases := map[string]string{
+		``:                        "",
+		`null`:                    "",
+		`"contextWindowExceeded"`: "contextWindowExceeded",
+		`{"httpConnectionFailed":{"httpStatusCode":502}}`: "httpConnectionFailed, http 502",
+		`{"responseStreamDisconnected":{}}`:               "responseStreamDisconnected",
+		`[1,2]`:                                           "unrecognized",
+	}
+	for raw, want := range cases {
+		if got := codexErrorCode([]byte(raw)); got != want {
+			t.Errorf("codexErrorCode(%s) = %q, want %q", raw, got, want)
+		}
+	}
 }

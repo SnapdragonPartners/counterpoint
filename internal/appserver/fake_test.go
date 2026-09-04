@@ -162,7 +162,11 @@ func (f *fakeServer) handle(env *envelope) {
 			f.fail(env.ID, -32602, "initialize requires clientInfo.name")
 			return
 		}
-		f.respond(env.ID, map[string]any{"userAgent": "fake"})
+		if f.scenario == "bad-init-shape" {
+			f.respond(env.ID, map[string]any{"userAgent": "fake"})
+			return
+		}
+		f.respond(env.ID, map[string]any{"userAgent": "fake", "codexHome": "/tmp/fake-codex", "platformFamily": "unix", "platformOs": "fake"})
 	case "initialized":
 		f.mu.Lock()
 		f.initialized = true
@@ -207,7 +211,7 @@ func (f *fakeServer) threadResult(id, cwd string) map[string]any {
 		"cwd":             cwd,
 		"modelProvider":   "fake",
 		"approvalPolicy":  "never",
-		"sandbox":         map[string]any{"type": "readOnly"},
+		"sandbox":         map[string]any{"type": "readOnly", "networkAccess": false},
 	}
 }
 
@@ -237,7 +241,17 @@ func (f *fakeServer) handleThreadStart(env *envelope) {
 	f.mu.Unlock()
 
 	// reorder: answer the second request first, then the held first one.
-	f.respond(env.ID, f.threadResult(id, p.Cwd))
+	result := f.threadResult(id, p.Cwd)
+	if f.scenario == "wrong-policy" {
+		result["sandbox"] = map[string]any{"type": "workspaceWrite", "networkAccess": true}
+	}
+	f.respond(env.ID, result)
+	if f.scenario == "deaf" {
+		// Stop consuming stdin; the handler runs on the read loop. A sleep
+		// rather than select{} so the runtime's deadlock detector does not
+		// end the process.
+		time.Sleep(time.Hour)
+	}
 	if held != nil {
 		f.mu.Lock()
 		f.nextThread++
@@ -368,6 +382,18 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 		}})
 	case "empty":
 		complete("completed", nil)
+	case "exit-after-complete":
+		// A large final burst so unread bytes remain in the pipe at exit.
+		reviewItem(reviewText + strings.Repeat("!", 256*1024))
+		complete("completed", nil)
+		os.Exit(0)
+	case "aggregate-overflow":
+		// Each message is valid on its own; together they exceed the bound.
+		chunk := strings.Repeat("m", 1<<20)
+		for i := 0; i < 17; i++ {
+			message(chunk)
+		}
+		complete("completed", nil)
 	case "approval":
 		if msg := f.runApprovals(threadID, turnID); msg != "" {
 			complete("failed", map[string]any{"error": map[string]any{"message": msg}})
@@ -407,7 +433,7 @@ func (f *fakeServer) runApprovals(threadID, turnID string) string {
 		{"item/fileChange/requestApproval", with(map[string]any{"reason": "wants to edit"}), wantField("decision", "decline")},
 		{"item/permissions/requestApproval", with(map[string]any{"cwd": "/x", "permissions": map[string]any{}}), wantKey("permissions")},
 		{"item/tool/requestUserInput", with(map[string]any{"isBlocking": true, "questions": []any{}}), wantKey("answers")},
-		{"execCommandApproval", map[string]any{"conversationId": threadID, "callId": "1", "command": []string{"ls"}, "cwd": "/x", "parsedCmd": []any{}}, wantField("decision", "denied")},
+		{"execCommandApproval", map[string]any{"conversationId": threadID, "callId": "1", "command": []string{"ls"}, "cwd": "/x", "parsedCmd": []any{}}, wantLegacyDenied},
 		{"item/weird/request", with(nil), func(env envelope) bool { return env.Error != nil }},
 	}
 	for _, c := range checks {
@@ -435,6 +461,19 @@ func wantField(key, value string) func(envelope) bool {
 		var m map[string]any
 		return env.Error == nil && json.Unmarshal(env.Result, &m) == nil && m[key] == value
 	}
+}
+
+// wantLegacyDenied checks the schema's denial shape for the legacy approval
+// methods: {"decision": {"denied": {"rejection": "<non-empty>"}}}.
+func wantLegacyDenied(env envelope) bool {
+	var r struct {
+		Decision struct {
+			Denied *struct {
+				Rejection string `json:"rejection"`
+			} `json:"denied"`
+		} `json:"decision"`
+	}
+	return env.Error == nil && json.Unmarshal(env.Result, &r) == nil && r.Decision.Denied != nil && r.Decision.Denied.Rejection != ""
 }
 
 func wantKey(key string) func(envelope) bool {
