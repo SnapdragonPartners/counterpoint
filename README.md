@@ -15,8 +15,9 @@ and a reviewer without becoming a general-purpose orchestrator.
 
 ## Status
 
-Counterpoint is at the specification stage. The [MVP specification](docs/MVP.md)
-defines the first implementation.
+The MVP described in the [MVP specification](docs/MVP.md) is implemented and
+covered by automated tests against a fake app-server. Live acceptance against
+a real Codex CLI is a manual step recorded in the specification.
 
 ## Intended workflow
 
@@ -77,13 +78,63 @@ reviewers, remote execution, push/PR automation, and a general workflow engine.
 
 ## Timeouts
 
-Each review is bounded by a fixed twenty-minute Counterpoint timeout. Claude
-Code separately aborts a stdio MCP tool call that has produced no response for
-thirty minutes by default, controlled by the
+Counterpoint applies two fixed phase budgets inside a review call: sixty
+seconds for setup, which covers starting `codex app-server`, its handshake, and
+starting or resuming the thread, and then twenty minutes for the review turn
+itself. These are not a bound on the whole call. Lock acquisition waits up to
+two seconds, Git validation and state persistence have no Counterpoint
+deadline, and cleanup after a failure or cancellation can add up to five
+seconds waiting for the turn to interrupt and five more waiting for the child
+to exit before it is killed. A call that hits every budget can exceed
+twenty-one minutes by that cleanup time plus however long Git takes.
+
+Claude Code separately aborts a stdio MCP tool call that has produced no
+response for thirty minutes by default, controlled by the
 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. Keep
-that value above twenty minutes if you have lowered it. The per-call wall-clock
-limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`,
-defaults to many hours and normally needs no change.
+that default; it leaves adequate margin over the phase budgets. Do not lower it
+to anything near twenty-one minutes. The per-call wall-clock limit,
+`MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`, defaults
+to many hours and normally needs no change.
+
+## Limits
+
+- `branch_notes` may be at most 1 MiB (1,048,576 bytes) decoded; longer notes
+  are rejected before any work starts.
+- One MCP request line may be at most 6 MiB plus 64 KiB (6,356,992 bytes) on
+  the wire, which fits maximal notes after JSON escaping plus framing. A longer
+  line, or a request spread over several lines, ends the session.
+- Bridge warnings returned with a review are capped at 32 entries totalling at
+  most 8 KiB (8,192 bytes). When any are omitted, one additional final entry
+  reports the omitted count; that marker is not counted against either cap.
+
+## Installation and use
+
+Build the binary and register it with Claude Code as a stdio MCP server:
+
+```bash
+make build
+claude mcp add counterpoint -- "$PWD/bin/counterpoint"
+```
+
+Counterpoint exposes one tool, `review`, taking `repo`, `branch`, `commit`,
+and `branch_notes`. It returns the canonical repository path, the full branch
+ref, the reviewed commit and its merge base, the round number, Codex's review
+text, any bridge warnings, and whether the result was replayed from state.
+State lives under the user configuration directory in a `counterpoint`
+subdirectory; `COUNTERPOINT_STATE_FILE` overrides the path for tests and
+unusual installations. Diagnostics go to stderr only.
+
+Prerequisites at review time: a clean worktree checked out at the tip of a
+non-primary branch, and a locally authenticated Codex CLI.
+
+## Operational notes
+
+- Leave the Codex review thread for a branch unarchived and closed. Opening it
+  in the Codex app while a review runs causes a writer conflict, and archiving
+  it prevents Counterpoint from resuming it.
+- After a resume, the app-server may omit the effective reasoning effort from
+  its response, so the log line for that round can show an empty effort even
+  though the process-level override is in force.
 
 ## Development
 
@@ -93,9 +144,6 @@ make build     # bin/counterpoint
 make schema    # regenerate the codex app-server JSON schema into .schema/
 make install-hooks  # pre-commit hook that runs make check
 ```
-
-The MCP server is not implemented yet; the binary currently supports only
-`--version`.
 
 ## Name
 

@@ -1,4 +1,4 @@
-package appserver
+package apptest
 
 import (
 	"bufio"
@@ -7,23 +7,80 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 )
 
-// The test binary doubles as a fake app-server: when fakeEnv names a
-// scenario, TestMain runs the fake instead of the tests. Tests spawn
-// os.Args[0] so the client talks to a real subprocess over real pipes.
+// A test binary doubles as a fake app-server: when ScenarioEnv names a
+// scenario, the package's TestMain calls Run instead of running tests, and
+// tests spawn os.Args[0] so the client talks to a real subprocess over real
+// pipes. The fake validates requests with literal protocol strings so a
+// wrong constant in the client cannot pass by matching itself.
 const (
-	fakeEnv      = "COUNTERPOINT_FAKE_APPSERVER"
-	fakeStateEnv = "COUNTERPOINT_FAKE_STATE"
+	// ScenarioEnv selects the fake's behavior.
+	ScenarioEnv = "COUNTERPOINT_FAKE_APPSERVER"
+	// StateEnv names a file where issued thread ids persist across runs;
+	// received interrupts are appended to StateEnv + ".events".
+	StateEnv = "COUNTERPOINT_FAKE_STATE"
+
+	// Bounds mirrored from the client so scenarios can exceed them.
+	maxMessageSize = 16 << 20
+	outboxSize     = 64
+	maxWarnings    = 32
 )
 
-func TestMain(m *testing.M) {
-	if scenario := os.Getenv(fakeEnv); scenario != "" {
-		os.Exit(runFake(scenario, os.Getenv(fakeStateEnv)))
+// Main runs the fake when ScenarioEnv is set and returns true, so a
+// package's TestMain can hand off to it before running tests.
+func Main() bool {
+	scenario := os.Getenv(ScenarioEnv)
+	if scenario == "" {
+		return false
 	}
-	os.Exit(m.Run())
+	os.Exit(Run(scenario, os.Getenv(StateEnv)))
+	return true
+}
+
+// Wire shapes the fake needs, kept independent of the client's types.
+type envelope struct {
+	ID     json.RawMessage `json:"id,omitempty"`
+	Method string          `json:"method,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+type initializeParams struct {
+	ClientInfo struct {
+		Name string `json:"name"`
+	} `json:"clientInfo"`
+}
+
+type threadStartParams struct {
+	Cwd            string `json:"cwd"`
+	Sandbox        string `json:"sandbox"`
+	ApprovalPolicy string `json:"approvalPolicy"`
+}
+
+type threadResumeParams struct {
+	ThreadID       string `json:"threadId"`
+	Cwd            string `json:"cwd"`
+	Sandbox        string `json:"sandbox"`
+	ApprovalPolicy string `json:"approvalPolicy"`
+}
+
+type reviewStartParams struct {
+	ThreadID string `json:"threadId"`
+	Target   struct {
+		Type         string `json:"type"`
+		Instructions string `json:"instructions"`
+	} `json:"target"`
+	Delivery string `json:"delivery"`
+}
+
+type turnInterruptParams struct {
+	TurnID string `json:"turnId"`
 }
 
 type fakeServer struct {
@@ -44,7 +101,8 @@ type fakeServer struct {
 	heldStart   *envelope // reorder scenario: first thread/start held back
 }
 
-func runFake(scenario, statePath string) int {
+// Run serves the fake app-server on stdio until stdin closes.
+func Run(scenario, statePath string) int {
 	fmt.Fprintln(os.Stderr, "fake app-server starting: diagnostics on stderr must never reach stdout")
 	f := &fakeServer{
 		scenario:   scenario,
@@ -57,7 +115,7 @@ func runFake(scenario, statePath string) int {
 	f.loadThreads()
 
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), MaxMessageSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMessageSize)
 	for scanner.Scan() {
 		var env envelope
 		if err := json.Unmarshal(scanner.Bytes(), &env); err != nil {
@@ -153,6 +211,9 @@ func (f *fakeServer) handle(env *envelope) {
 
 	switch env.Method {
 	case "initialize":
+		if f.scenario == "stall-init" {
+			return // never answered; the client must be able to give up
+		}
 		if f.scenario == "bad-init" {
 			f.fail(env.ID, -32000, "initialize rejected")
 			return
@@ -414,7 +475,7 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 	case "exit":
 		os.Exit(3)
 	case "huge":
-		delta(strings.Repeat("x", MaxMessageSize+1))
+		delta(strings.Repeat("x", maxMessageSize+1))
 	case "large":
 		delta(strings.Repeat("d", 100*1024))
 		reviewItem(strings.Repeat("R", 200*1024))

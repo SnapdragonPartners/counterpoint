@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strings"
 	"testing"
 )
@@ -21,11 +20,11 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
-func TestRunDefaultIsNotImplemented(t *testing.T) {
+func TestRunRejectsPositionalArguments(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := run(context.Background(), nil, &stdout, &stderr)
-	if !errors.Is(err, errNotImplemented) {
-		t.Fatalf("run() error = %v, want %v", err, errNotImplemented)
+	err := run(context.Background(), []string{"serve"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("run(serve) = nil error, want error")
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty: stdout is reserved for protocol data", stdout.String())

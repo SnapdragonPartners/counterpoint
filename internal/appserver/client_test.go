@@ -12,15 +12,24 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/SnapdragonPartners/counterpoint/internal/appserver/apptest"
 )
+
+func TestMain(m *testing.M) {
+	if apptest.Main() {
+		return
+	}
+	os.Exit(m.Run())
+}
 
 // fakeClient starts a client against the fake app-server running the given
 // scenario. The child inherits the environment, so the scenario and state
 // path are set with t.Setenv.
 func fakeClient(t *testing.T, scenario string, statePath string) (*Client, *bytes.Buffer) {
 	t.Helper()
-	t.Setenv(fakeEnv, scenario)
-	t.Setenv(fakeStateEnv, statePath)
+	t.Setenv(apptest.ScenarioEnv, scenario)
+	t.Setenv(apptest.StateEnv, statePath)
 	var stderr syncBuffer
 	cl, err := Start(context.Background(), Options{
 		Command: os.Args[0],
@@ -302,8 +311,8 @@ func TestReviewOnUnexpectedThreadIsRejected(t *testing.T) {
 }
 
 func TestHandshakeFailureReapsChild(t *testing.T) {
-	t.Setenv(fakeEnv, "bad-init")
-	t.Setenv(fakeStateEnv, "")
+	t.Setenv(apptest.ScenarioEnv, "bad-init")
+	t.Setenv(apptest.StateEnv, "")
 	_, err := Start(context.Background(), Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
 	if err == nil || !strings.Contains(err.Error(), "initialize rejected") {
 		t.Fatalf("Start error = %v, want the app-server's rejection", err)
@@ -381,8 +390,8 @@ func TestWritesAreCancellableWhenChildStopsReading(t *testing.T) {
 }
 
 func TestIncompatibleInitializeIsRejected(t *testing.T) {
-	t.Setenv(fakeEnv, "bad-init-shape")
-	t.Setenv(fakeStateEnv, "")
+	t.Setenv(apptest.ScenarioEnv, "bad-init-shape")
+	t.Setenv(apptest.StateEnv, "")
 	_, err := Start(context.Background(), Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
 	if !errors.Is(err, ErrIncompatible) {
 		t.Fatalf("Start error = %v, want ErrIncompatible", err)
@@ -615,5 +624,20 @@ func TestWarningsAreBounded(t *testing.T) {
 	// The bound resets between reviews.
 	if rev2, err := cl.Review(context.Background(), th.ID, "y"); err != nil || len(rev2.Warnings) > maxWarnings+1 {
 		t.Errorf("second review: %v, %d warnings", err, len(rev2.Warnings))
+	}
+}
+
+func TestStalledInitializeIsCancellable(t *testing.T) {
+	t.Setenv(apptest.ScenarioEnv, "stall-init")
+	t.Setenv(apptest.StateEnv, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := Start(ctx, Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > closeGrace+3*time.Second {
+		t.Errorf("Start took %v to give up and reap the child", elapsed)
 	}
 }

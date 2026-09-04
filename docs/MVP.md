@@ -84,8 +84,9 @@ Fields:
   are rejected.
 - `commit` is any unambiguous commit identifier, resolved immediately to a full
   object ID. It must be the current tip of `branch` and the worktree's `HEAD`.
-- `branch_notes` is non-empty author-produced handoff text. Counterpoint does
-  not attempt to derive or rewrite it.
+- `branch_notes` is non-empty author-produced handoff text of at most 1 MiB.
+  Counterpoint does not attempt to derive or rewrite it; longer notes are
+  rejected before any work starts.
 
 Successful output:
 
@@ -97,9 +98,13 @@ Successful output:
   "base": "9c1f0e4...merge-base object id...",
   "round": 8,
   "review": "Codex's completed review text",
-  "warnings": []
+  "warnings": [],
+  "replayed": false
 }
 ```
+
+`replayed` is true when an identical completed request was answered from
+state without a new Codex turn.
 
 `review` is text, not a machine-enforced verdict in the MVP. The authoring agent
 and human can understand explicit approval or findings without Counterpoint
@@ -107,8 +112,10 @@ introducing a second interpretation layer. A structured verdict may be added
 after real usage demonstrates a need.
 
 `warnings` lists bridge-level events that did not stop the review but that the
-caller should know about, such as declined approval requests. Counterpoint
-never splices warnings into Codex's review text.
+caller should know about, such as declined approval requests. The list is
+bounded at 32 entries totalling at most 8 KiB; when any are omitted, one
+additional final entry outside those caps reports the omitted count.
+Counterpoint never splices warnings into Codex's review text.
 
 Errors are returned as MCP tool errors with operational context and without
 credentials or unrelated process output.
@@ -332,6 +339,12 @@ without summarizing them away. The instructions direct Codex to:
 - return actionable findings ordered by severity, or explicit approval when no
   blocking findings remain.
 
+The instructions also tell Codex that it is running non-interactively in a
+read-only sandbox: it must not request additional permissions or user input,
+should use the best available read-only approach, complete the review
+autonomously, and report any material limitation in the review itself. This
+guidance lives in the prompt, not in the protocol-level declines.
+
 The instructions include the Counterpoint round number. Branch notes are
 delimited clearly as untrusted author input.
 
@@ -349,10 +362,16 @@ then fails with a clear "another review is in progress" error rather than
 queueing behind a full review. Serializing reviews for different branches is an
 accepted MVP limitation.
 
-Every review turn has a fixed timeout of twenty minutes in the MVP. The limit
-sits below the MCP client's idle timeout so Counterpoint fails first with a
-clear error. Observed reviews rarely exceed five minutes. A configurable
-timeout is deferred.
+Two fixed phase budgets apply. Setup has sixty seconds covering the
+app-server launch, its handshake, and thread start or resume; a stall anywhere
+in setup fails the call, closes the child, and releases the lock. The review
+turn then has twenty minutes. Lock acquisition (two seconds), Git validation,
+persistence, and cleanup (up to five seconds for the turn to interrupt and
+five for the child to exit before it is killed) are outside both budgets, so
+the budgets are not a bound on the whole call. They sit well below the MCP
+client's default idle timeout so Counterpoint fails first with a clear error.
+Observed reviews rarely exceed five minutes. Configurable timeouts are
+deferred.
 
 On timeout, MCP request cancellation, or closure of Counterpoint's own stdin,
 Counterpoint sends `turn/interrupt`, waits briefly for the terminal event, and
@@ -389,9 +408,11 @@ dumps by default.
 
 Claude Code's per-call MCP tool timeout defaults to many hours, but its idle
 timeout for stdio servers aborts a call that produces no response and no
-progress notification for thirty minutes. Counterpoint's fixed twenty-minute
-turn timeout sits below that limit, and the MVP does not send progress
-notifications, so default client settings need no change. The README names the
+progress notification for thirty minutes. Counterpoint's phase budgets total
+twenty-one minutes plus unbudgeted Git and cleanup time, and the MVP does not
+send progress notifications, so the thirty-minute default should be kept as
+margin rather than lowered. MCP input is bounded to one complete JSON value
+per line of at most 6 MiB plus 64 KiB on the wire. The README names the
 client settings for users who have lowered them.
 
 ## Required tests

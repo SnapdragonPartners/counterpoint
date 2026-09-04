@@ -83,7 +83,10 @@ type Review struct {
 	Warnings []string
 }
 
-// Start launches the app-server and completes the initialize handshake.
+// Start launches the app-server and completes the initialize handshake. ctx
+// bounds the handshake only: if the child never answers initialize, the
+// context's end unwinds it through Close. The process itself lives until
+// Close or a terminating failure.
 func Start(ctx context.Context, opts Options) (*Client, error) {
 	command := opts.Command
 	if command == "" {
@@ -102,7 +105,7 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		log = slog.Default()
 	}
 
-	c, err := spawn(ctx, command, args, stderr, log)
+	c, err := spawn(command, args, stderr, log)
 	if err != nil {
 		return nil, err
 	}
