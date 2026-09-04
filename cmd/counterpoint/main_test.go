@@ -58,9 +58,26 @@ func TestRunServesInjectedStreams(t *testing.T) {
 	go func() {
 		_, _ = io.WriteString(inW, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`+"\n")
 	}()
-	line, err := bufio.NewReader(outR).ReadString('\n')
-	if err != nil || !strings.Contains(line, `"serverInfo"`) {
-		t.Fatalf("initialize response did not reach the injected stdout: %q, %v", line, err)
+	// Read on a goroutine so a regression that writes nothing to the
+	// injected stdout fails here instead of stalling the whole suite.
+	type readResult struct {
+		line string
+		err  error
+	}
+	got := make(chan readResult, 1)
+	go func() {
+		line, err := bufio.NewReader(outR).ReadString('\n')
+		got <- readResult{line, err}
+	}()
+	select {
+	case r := <-got:
+		if r.err != nil || !strings.Contains(r.line, `"serverInfo"`) {
+			t.Fatalf("initialize response did not reach the injected stdout: %q, %v", r.line, r.err)
+		}
+	case <-time.After(10 * time.Second):
+		_ = inW.Close()
+		_ = outR.Close()
+		t.Fatal("no initialize response on the injected stdout within 10s")
 	}
 	_ = inW.Close() // client disconnects; the server must exit
 	select {
