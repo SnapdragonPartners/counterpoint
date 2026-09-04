@@ -33,8 +33,9 @@ acceptance criteria in `docs/MVP.md`, not here.
 - Codex reviews committed artifacts and code.
 - DR orchestrates, resolves contention, authorizes external effects, and accepts.
 - Work is accepted only after Codex and DR approve it.
-- Until Counterpoint can carry the exchange itself, Claude/Codex communication
-  routes through DR manually.
+- Claude/Codex communication goes through the Counterpoint review tool when it
+  is available in the session; otherwise it routes through DR manually. See
+  "Submitting for review" below.
 
 If Claude and Codex do not converge after reasoned attempts, preserve both
 positions and escalate the decision to DR rather than cycling indefinitely.
@@ -50,7 +51,8 @@ positions and escalate the decision to DR rather than cycling indefinitely.
 5. Produce branch notes for Codex and submit the exact local commit for review.
 6. Address every blocking finding with a fix or a reasoned response. Commit each
    review round locally and submit the new commit with updated branch notes.
-7. Continue until Codex has no blocking findings or DR explicitly overrides one.
+7. Continue until Codex has no blocking findings, DR explicitly overrides one,
+   or Claude has escalated a disputed finding to DR (see below).
 8. Stop for DR approval. Do not push before both Codex and DR approve; push is a
    human gate, not a routine implementation step.
 9. After authorization, push and open a pull request to the primary branch.
@@ -61,6 +63,47 @@ positions and escalate the decision to DR rather than cycling indefinitely.
 Keep at most one feature/development branch open at a time unless DR explicitly
 authorizes parallel work. Parallel fix branches are acceptable when they do not
 share mutable state.
+
+### Responding to findings
+
+Codex is a reviewer, not an authority. Only blocking findings (P0 and P1 as
+defined under "Security and testing") must be resolved before the push gate;
+suggestions and style points are addressed at Claude's discretion and their
+disposition noted. A finding Claude judges wrong, out of scope, or
+disproportionate to the change gets a reasoned response in the next round's
+notes rather than a change. If Codex reaffirms it, stop, state both positions,
+and bring the decision to DR before another round. Do not implement a change
+Claude believes is wrong in order to end the loop.
+
+### Submitting for review
+
+Counterpoint is registered as an MCP server in Claude Code, so the review
+handoff is normally a tool call, not a message to DR:
+
+- If the `counterpoint` review tool is available, call it directly with the
+  absolute repository path, the branch, the exact local commit, and the branch
+  notes. The commit must be the branch tip and the checked-out HEAD of a clean
+  worktree, so commit before calling and do not touch the worktree while the
+  review runs. The call blocks for the whole Codex turn, typically several
+  minutes; Claude Code moves it to a background task after two minutes and
+  delivers the result as a task notification. Do not start unrelated work that
+  changes the worktree while waiting. Submit every round through the tool, and
+  do not ask DR to relay when the tool is available.
+- If the tool is not available in the session, write the branch notes and ask
+  DR to submit them to Codex manually, then wait for the relayed findings.
+- The Codex thread is persistent per repository and branch, so each round
+  builds on the previous one. Assume the thread persists and write later
+  rounds' notes as a delta, but keep the disposition of every prior finding in
+  each round's notes so a reviewer that lost context can still verify. A new
+  or renamed branch starts a new thread with no memory of earlier ones. If the
+  tool reports the thread is unavailable, stop and tell DR rather than working
+  around it.
+- Treat the tool result as Codex's review: address every blocking finding as
+  described in the workflow above, and quote the approval or the findings to
+  DR when stopping at the push gate. The reviewer runs in a read-only sandbox
+  and cannot build or run tests, so its verdict is an inspection of the commit
+  against the branch notes and the repository; the author's verification
+  claims must be backed by the commands and outcomes in the notes.
 
 ### Branch notes
 
