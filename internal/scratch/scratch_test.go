@@ -154,10 +154,12 @@ func TestPrepareReplacesACrashRemnant(t *testing.T) {
 func TestPrepareRejectsARootOverlappingTheRepository(t *testing.T) {
 	repo, commit := newRepo(t, nil)
 	cases := map[string]string{
-		"inside the worktree":      filepath.Join(repo.Worktree, "scratch"),
-		"inside the common dir":    filepath.Join(repo.CommonDir, "scratch"),
-		"the worktree itself":      repo.Worktree,
-		"a parent of the worktree": filepath.Dir(repo.Worktree),
+		"inside the worktree":                filepath.Join(repo.Worktree, "scratch"),
+		"nested and missing in the worktree": filepath.Join(repo.Worktree, "missing", "deeper", "scratch"),
+		"inside the common dir":              filepath.Join(repo.CommonDir, "scratch"),
+		"missing in the common dir":          filepath.Join(repo.CommonDir, "missing", "scratch"),
+		"the worktree itself":                repo.Worktree,
+		"a parent of the worktree":           filepath.Dir(repo.Worktree),
 	}
 	for name, root := range cases {
 		_, err := Prepare(context.Background(), Options{Root: root, WorkflowKey: "k", Repo: repo, Commit: commit})
@@ -165,8 +167,37 @@ func TestPrepareRejectsARootOverlappingTheRepository(t *testing.T) {
 			t.Errorf("%s: error = %v, want ErrRootOverlapsRepository", name, err)
 		}
 	}
+	// Git status does not show empty directories, so check the missing
+	// roots directly: a rejected root must not be created at all.
+	for _, path := range []string{filepath.Join(repo.Worktree, "missing"), filepath.Join(repo.CommonDir, "missing")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("rejected root was created at %s: %v", path, err)
+		}
+	}
 	if status := git(t, repo.Worktree, "status", "--porcelain"); status != "" {
 		t.Errorf("a rejected root still wrote into the repository:\n%s", status)
+	}
+}
+
+func TestPrepareResolvesAMissingRootThroughItsExistingAncestor(t *testing.T) {
+	repo, commit := newRepo(t, nil)
+	base := t.TempDir() // unresolved: a symlink on macOS
+	root := filepath.Join(base, "a", "b", "checkouts")
+	co, err := Prepare(context.Background(), Options{Root: root, WorkflowKey: "k", Repo: repo, Commit: commit})
+	if err != nil {
+		t.Fatalf("Prepare with a missing nested root: %v", err)
+	}
+	defer co.Close()
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(resolvedBase, "a", "b", "checkouts")
+	if !strings.HasPrefix(co.Dir, want+string(filepath.Separator)) {
+		t.Errorf("checkout %s is not under the canonical root %s", co.Dir, want)
+	}
+	if info, err := os.Stat(want); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("root %s = %v, %v; want a 0700 directory", want, info, err)
 	}
 }
 

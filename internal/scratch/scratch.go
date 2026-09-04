@@ -112,11 +112,17 @@ func Prepare(ctx context.Context, opts Options) (co *Checkout, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// Overlap is checked before anything is created, so a misconfigured
+	// root inside the repository never leaves even an empty directory
+	// there.
 	if err := rejectOverlap(root, opts.Repo.Worktree); err != nil {
 		return nil, err
 	}
 	if err := rejectOverlap(root, opts.Repo.CommonDir); err != nil {
 		return nil, err
+	}
+	if err := os.MkdirAll(root, dirPerm); err != nil {
+		return nil, fmt.Errorf("create scratch root: %w", err)
 	}
 
 	sum := sha256.Sum256([]byte(opts.WorkflowKey))
@@ -227,20 +233,36 @@ func (c *Checkout) removeOwned(path string) error {
 	return nil
 }
 
-// canonicalRoot creates the root if needed and returns it with symlinks
-// resolved, so every later comparison and removal uses one spelling.
+// canonicalRoot returns the root with symlinks resolved without creating
+// it: the nearest existing ancestor is resolved and the missing components
+// are appended, so the overlap check sees where the root would really be
+// before any directory is made. Every later comparison and removal then
+// uses one spelling.
 func canonicalRoot(root string) (string, error) {
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("scratch root must be absolute, got %q", root)
 	}
-	if err := os.MkdirAll(root, dirPerm); err != nil {
-		return "", fmt.Errorf("create scratch root: %w", err)
+	existing, missing := filepath.Clean(root), ""
+	for {
+		_, err := os.Lstat(existing)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect %s: %w", existing, err)
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", fmt.Errorf("no existing ancestor for scratch root %s", root)
+		}
+		missing = filepath.Join(filepath.Base(existing), missing)
+		existing = parent
 	}
-	resolved, err := filepath.EvalSymlinks(root)
+	resolved, err := filepath.EvalSymlinks(existing)
 	if err != nil {
 		return "", fmt.Errorf("resolve scratch root: %w", err)
 	}
-	return resolved, nil
+	return filepath.Join(resolved, missing), nil
 }
 
 // rejectOverlap fails when root is inside dir, dir is inside root, or they
