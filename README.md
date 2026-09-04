@@ -15,9 +15,10 @@ and a reviewer without becoming a general-purpose orchestrator.
 
 ## Status
 
-The MVP described in the [MVP specification](docs/MVP.md) is implemented and
-covered by automated tests against a fake app-server. Live acceptance against
-a real Codex CLI is a manual step recorded in the specification.
+The MVP described in the [MVP specification](docs/MVP.md) is complete. It is
+covered by automated tests against a fake app-server and was accepted in a
+live run against a real Codex CLI; the specification records the status and
+links the follow-up issues.
 
 ## Intended workflow
 
@@ -109,12 +110,21 @@ to many hours and normally needs no change.
 
 ## Installation and use
 
-Build the binary and register it with Claude Code as a stdio MCP server:
+Install the binary and register it with Claude Code as a stdio MCP server at
+user scope, so it is available in every project:
 
 ```bash
-make build
-claude mcp add counterpoint -- "$PWD/bin/counterpoint"
+make install
+claude mcp add -s user counterpoint -- counterpoint
 ```
+
+`make install` builds a version-stamped binary into `GOBIN`, or `GOPATH/bin`
+when `GOBIN` is unset; make sure that directory is on `PATH`, or register the
+absolute path instead. Registering the installed binary rather than
+`bin/counterpoint` keeps the tool stable while the repository is being
+developed: `make build` produces the build under test, and `make install`
+promotes it. MCP servers start with the client session, so restart Claude
+Code after installing a new version.
 
 Counterpoint exposes one tool, `review`, taking `repo`, `branch`, `commit`,
 and `branch_notes`. It returns the canonical repository path, the full branch
@@ -141,7 +151,8 @@ non-primary branch, and a locally authenticated Codex CLI.
 
 ```bash
 make check     # gofmt check, go vet, golangci-lint, go test -race; what CI runs
-make build     # bin/counterpoint
+make build     # bin/counterpoint, the build under test
+make install   # versioned binary into GOBIN or GOPATH/bin; register that with your MCP client
 make schema    # regenerate the codex app-server JSON schema into .schema/
 make install-hooks  # pre-commit hook that runs make check
 ```

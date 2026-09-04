@@ -1,4 +1,4 @@
-.PHONY: build test lint vet fmt fmt-check check install-lint install-hooks schema clean
+.PHONY: build install test lint vet fmt fmt-check check install-lint install-hooks schema clean
 
 GOLANGCI_LINT_VERSION := v1.64.8
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -13,6 +13,14 @@ GOLANGCI_LINT := $(TOOLS_DIR)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/counterpoint ./cmd/counterpoint
+
+# The installed binary is the stable tool MCP clients run; bin/counterpoint is
+# the build under test. Installing promotes deliberately. go install chooses
+# the destination: GOBIN when set, otherwise the first GOPATH entry's bin, the
+# conventional PATH entry for Go tools. go list reports that same path.
+install:
+	go install -ldflags "$(LDFLAGS)" ./cmd/counterpoint
+	@echo "Installed $(VERSION) to $$(go list -f '{{.Target}}' ./cmd/counterpoint)"
 
 test:
 	go test -race -cover ./...
