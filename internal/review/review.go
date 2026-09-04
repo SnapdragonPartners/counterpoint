@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"time"
 
@@ -201,6 +202,12 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		// review or skip the idempotency check.
 		if missing := incompleteWorkflowField(wf); missing != "" {
 			return nil, fmt.Errorf("%w: workflow %s in %s is missing %s", ErrStateInvalid, key, s.store.Path(), missing)
+		}
+		// The next round number must be representable; untrusted state
+		// could hold a value whose increment would wrap and persist a
+		// corrupted record after a paid review.
+		if wf.Round >= math.MaxInt {
+			return nil, fmt.Errorf("%w: workflow %s in %s has a round that cannot be incremented", ErrStateInvalid, key, s.store.Path())
 		}
 	}
 

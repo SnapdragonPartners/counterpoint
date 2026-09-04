@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -468,5 +469,29 @@ func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
 		t.Errorf("lock not released after cancellation: %v", err)
 	} else {
 		_ = l.Release()
+	}
+}
+
+func TestUnincrementableRoundFailsClosed(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
+	key := gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
+	st, _ := h.store.Load()
+	st.Put(key, state.Workflow{ThreadID: "thr_1", LastCommit: tip, LastBase: "b", LastRequestHash: "h", Round: math.MaxInt, LastReview: "r"})
+	if err := h.store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := h.svc.Review(context.Background(), h.request(h.repo.commit("feature-2"), "r2"))
+	if !errors.Is(err, ErrStateInvalid) || !strings.Contains(err.Error(), "incremented") {
+		t.Fatalf("error = %v, want ErrStateInvalid about the round", err)
+	}
+	if h.spawns != 0 {
+		t.Error("a Codex turn was attempted with an unincrementable round")
+	}
+	reloaded, _ := h.store.Load()
+	if wf, _ := reloaded.Get(key); wf.Round != math.MaxInt {
+		t.Errorf("state changed: round %d", wf.Round)
 	}
 }

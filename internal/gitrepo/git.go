@@ -50,6 +50,7 @@ var gitEnvBlocklist = [...]string{ //nolint:gochecknoglobals // constant table
 	"GIT_NAMESPACE=",
 	"GIT_TERMINAL_PROMPT=",
 	"LC_ALL=",
+	"GIT_OPTIONAL_LOCKS=",
 }
 
 // boundedBuffer retains at most limit bytes and records whether more were
@@ -140,18 +141,20 @@ func runBounded(ctx context.Context, dir string, stdoutLimit int, args ...string
 	return strings.TrimRight(stdout.String(), "\n"), stdout.overflow, nil
 }
 
-// cleanEnv drops blocklisted variables and pins prompts off and the locale
-// to C so diagnostics are stable and no invocation can wait on a terminal.
+// cleanEnv drops blocklisted variables and pins three settings: prompts
+// off so no invocation can wait on a terminal, the C locale so diagnostics
+// are stable, and optional locks off so read-only queries such as status
+// never refresh .git/index and the reviewed repository is left untouched.
 // The pinned keys are also blocklisted, so each appears exactly once.
 func cleanEnv(env []string) []string {
-	out := make([]string, 0, len(env)+2)
+	out := make([]string, 0, len(env)+3)
 	for _, kv := range env {
 		if blocked(kv) {
 			continue
 		}
 		out = append(out, kv)
 	}
-	return append(out, "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	return append(out, "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_OPTIONAL_LOCKS=0")
 }
 
 func blocked(kv string) bool {

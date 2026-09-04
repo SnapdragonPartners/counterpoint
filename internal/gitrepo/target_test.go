@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -218,5 +219,40 @@ func TestValidateTargetHonorsCancelledContext(t *testing.T) {
 
 	if _, err := repo.ValidateTarget(ctx, "feature", tip, ""); err == nil {
 		t.Fatal("ValidateTarget with cancelled context: want error, got nil")
+	}
+}
+
+func TestValidateTargetLeavesRepositoryUntouched(t *testing.T) {
+	r, _, tip := featureRepo(t)
+	// Make the index racily clean: a file whose mtime equals the index's
+	// would make status with optional locks rewrite the index.
+	indexPath := filepath.Join(r.dir, ".git", "index")
+	before, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(r.dir, "feature-1.txt"), info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.open().ValidateTarget(context.Background(), "feature", tip, ""); err != nil {
+		t.Fatalf("ValidateTarget: %v", err)
+	}
+	after, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("validation rewrote .git/index; optional locks must be disabled")
+	}
+	entries, _ := os.ReadDir(filepath.Join(r.dir, ".git"))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".lock") {
+			t.Errorf("lock file left behind: %s", e.Name())
+		}
 	}
 }
