@@ -1,7 +1,7 @@
 package review
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -77,17 +77,27 @@ Never modify files, refs, or the index.
 }
 
 // notesDelimiters returns opening and closing markers that do not occur in
-// the notes, so the notes cannot forge their own end. A random suffix is
-// added only when the plain markers collide.
+// the notes, so the notes cannot forge their own end. When the plain
+// markers collide, a tag derived deterministically from the notes is added,
+// and lengthened until neither marker occurs in them. Determinism keeps the
+// prompt reproducible and needs no entropy source.
 func notesDelimiters(notes string) (open, end string) {
 	open, end = "<<<BRANCH NOTES>>>", "<<<END BRANCH NOTES>>>"
-	for strings.Contains(notes, open) || strings.Contains(notes, end) {
-		var buf [8]byte
-		if _, err := rand.Read(buf[:]); err != nil {
-			panic("crypto/rand unavailable: " + err.Error())
-		}
-		tag := hex.EncodeToString(buf[:])
-		open, end = "<<<BRANCH NOTES "+tag+">>>", "<<<END BRANCH NOTES "+tag+">>>"
+	if !strings.Contains(notes, open) && !strings.Contains(notes, end) {
+		return open, end
 	}
-	return open, end
+	sum := sha256.Sum256([]byte(notes))
+	full := hex.EncodeToString(sum[:])
+	for n := 16; ; n++ {
+		var tag string
+		if n <= len(full) {
+			tag = full[:n]
+		} else {
+			tag = full + strings.Repeat("0", n-len(full))
+		}
+		open, end = "<<<BRANCH NOTES "+tag+">>>", "<<<END BRANCH NOTES "+tag+">>>"
+		if !strings.Contains(notes, open) && !strings.Contains(notes, end) {
+			return open, end
+		}
+	}
 }

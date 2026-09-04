@@ -4,9 +4,11 @@ package mcpserver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,14 +23,18 @@ const (
 	// ToolName is the single tool Counterpoint exposes.
 	ToolName = "review"
 
-	// MaxRequestBytes bounds one JSONL line read from the MCP client. It
-	// leaves room for the largest allowed branch notes plus framing; a
-	// longer line ends the session rather than being buffered.
-	MaxRequestBytes = review.MaxBranchNotesBytes + 64<<10
+	// MaxRequestBytes bounds one JSONL line read from the MCP client. A
+	// decoded byte of branch notes can occupy up to six bytes on the wire
+	// as a JSON escape, so the largest allowed notes fit with room for
+	// framing; a longer line ends the session rather than being buffered.
+	MaxRequestBytes = 6*review.MaxBranchNotesBytes + 64<<10
 )
 
-// ErrRequestTooLarge reports an MCP input line over MaxRequestBytes.
-var ErrRequestTooLarge = errors.New("mcp request exceeds the size limit")
+// Sentinel errors for MCP input framing.
+var (
+	ErrRequestTooLarge = errors.New("mcp request exceeds the size limit")
+	ErrRequestFraming  = errors.New("mcp request is not one complete JSON value per line")
+)
 
 // Input is the review tool's arguments. Field descriptions become the input
 // schema shown to the MCP client.
@@ -106,16 +112,18 @@ func Serve(ctx context.Context, server *mcp.Server, stdin io.ReadCloser, stdout 
 	return server.Run(ctx, transport)
 }
 
-// boundedLineReader passes bytes through until a single line exceeds the
-// limit, after which every read fails with ErrRequestTooLarge. The SDK
-// decodes newline-delimited JSON from this reader, so an oversized request
-// ends the session instead of being buffered in full.
+// boundedLineReader enforces the protocol's framing before the SDK sees
+// any bytes: each physical line must be one complete JSON value of at most
+// limit bytes. The SDK's decoder would otherwise accept a value spread
+// across many short lines, defeating a per-line bound. An oversized or
+// unframed line fails every subsequent read, ending the session instead of
+// buffering the request.
 type boundedLineReader struct {
-	r       *bufio.Reader
-	closer  io.Closer
-	limit   int
-	current int
-	failed  error
+	r      *bufio.Reader
+	closer io.Closer
+	limit  int
+	buf    []byte // a validated line, including its newline, not yet consumed
+	failed error
 }
 
 func newBoundedLineReader(rc io.ReadCloser, limit int) *boundedLineReader {
@@ -126,19 +134,53 @@ func (b *boundedLineReader) Read(p []byte) (int, error) {
 	if b.failed != nil {
 		return 0, b.failed
 	}
-	n, err := b.r.Read(p)
-	for _, c := range p[:n] {
-		if c == '\n' {
-			b.current = 0
+	if len(b.buf) == 0 {
+		line, err := b.nextLine()
+		if err != nil {
+			b.failed = err
+			return 0, err
+		}
+		b.buf = line
+	}
+	n := copy(p, b.buf)
+	b.buf = b.buf[n:]
+	return n, nil
+}
+
+// nextLine reads one line of at most limit bytes and requires it to be a
+// complete JSON value. Blank lines are skipped. io.EOF is returned only
+// when no partial line remains.
+func (b *boundedLineReader) nextLine() ([]byte, error) {
+	for {
+		var line []byte
+		for {
+			chunk, err := b.r.ReadSlice('\n')
+			line = append(line, chunk...)
+			if len(line) > b.limit+1 {
+				return nil, fmt.Errorf("%w: line longer than %d bytes", ErrRequestTooLarge, b.limit)
+			}
+			if err == nil {
+				break
+			}
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
+			if errors.Is(err, io.EOF) && len(bytes.TrimSpace(line)) == 0 {
+				return nil, io.EOF
+			}
+			if errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("%w: unterminated final line", ErrRequestFraming)
+			}
+			return nil, fmt.Errorf("read mcp input: %w", err)
+		}
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		b.current++
-		if b.current > b.limit {
-			b.failed = fmt.Errorf("%w: line longer than %d bytes", ErrRequestTooLarge, b.limit)
-			return 0, b.failed
+		if !json.Valid(bytes.TrimSpace(line)) {
+			return nil, fmt.Errorf("%w: line is not a complete JSON value", ErrRequestFraming)
 		}
+		return line, nil
 	}
-	return n, err
 }
 
 func (b *boundedLineReader) Close() error {

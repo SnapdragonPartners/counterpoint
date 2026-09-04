@@ -26,9 +26,10 @@ const (
 	// the app-server as a configuration override.
 	ReasoningEffort = "xhigh"
 
-	// StartupTimeout bounds launching the app-server and its initialize
-	// handshake, which happen before the review timer starts.
-	StartupTimeout = 60 * time.Second
+	// SetupTimeout bounds everything before the review turn: launching the
+	// app-server, its initialize handshake, and thread start or resume.
+	// The review timer starts only after setup, so setup needs its own.
+	SetupTimeout = 60 * time.Second
 
 	// MaxBranchNotesBytes bounds the author's notes, which are untrusted
 	// input carried into the prompt and the persisted state.
@@ -41,6 +42,7 @@ var (
 	ErrThreadUnavailable = errors.New("stored Codex thread could not be resumed")
 	ErrStateInvalid      = errors.New("stored workflow state is incomplete")
 	ErrTimeout           = errors.New("review timed out")
+	ErrSetupTimeout      = errors.New("app-server setup timed out")
 )
 
 // requestIDKey carries the request correlation id in a context.
@@ -104,10 +106,11 @@ type Options struct {
 
 // Service runs reviews.
 type Service struct {
-	store       *state.Store
-	newReviewer func(ctx context.Context) (Reviewer, error)
-	log         *slog.Logger
-	timeout     time.Duration
+	store        *state.Store
+	newReviewer  func(ctx context.Context) (Reviewer, error)
+	log          *slog.Logger
+	timeout      time.Duration
+	setupTimeout time.Duration
 }
 
 // New returns a Service.
@@ -120,18 +123,16 @@ func New(opts Options) *Service {
 	if nr == nil {
 		nr = DefaultReviewer(opts.Version, log)
 	}
-	return &Service{store: opts.Store, newReviewer: nr, log: log, timeout: Timeout}
+	return &Service{store: opts.Store, newReviewer: nr, log: log, timeout: Timeout, setupTimeout: SetupTimeout}
 }
 
 // DefaultReviewer starts codex app-server with the fixed reasoning effort.
-// The handshake is bounded by StartupTimeout and by the caller's context;
-// the process lifetime is owned by the client's Close.
+// The handshake is bounded by the setup context the service passes; the
+// process lifetime is owned by the client's Close.
 func DefaultReviewer(version string, log *slog.Logger) func(ctx context.Context) (Reviewer, error) {
 	return func(ctx context.Context) (Reviewer, error) {
 		args := append(appserver.DefaultArgs(), "-c", fmt.Sprintf("model_reasoning_effort=%q", ReasoningEffort))
-		hctx, cancel := context.WithTimeout(ctx, StartupTimeout)
-		defer cancel()
-		return appserver.Start(hctx, appserver.Options{
+		return appserver.Start(ctx, appserver.Options{
 			Command: appserver.DefaultCommand,
 			Args:    args,
 			Version: version,
@@ -193,11 +194,13 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	}
 	wf, known := st.Get(key)
 	if known {
-		// A stored workflow must be complete; an incomplete record could
-		// only come from corruption or a foreign writer, and starting a
-		// replacement thread would silently discard review context.
-		if wf.ThreadID == "" || wf.LastCommit == "" || wf.Round < 1 {
-			return nil, fmt.Errorf("%w: workflow %s in %s (thread %q, round %d, last commit %q)", ErrStateInvalid, key, s.store.Path(), wf.ThreadID, wf.Round, wf.LastCommit)
+		// A stored workflow must be a complete record of a finished review;
+		// anything else could only come from corruption or a foreign
+		// writer. Starting a replacement thread would silently discard
+		// review context, and a partial record could replay an empty
+		// review or skip the idempotency check.
+		if missing := incompleteWorkflowField(wf); missing != "" {
+			return nil, fmt.Errorf("%w: workflow %s in %s is missing %s", ErrStateInvalid, key, s.store.Path(), missing)
 		}
 	}
 
@@ -229,24 +232,29 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		PreviousTip: wf.LastCommit, HistoryRewritten: target.HistoryRewritten, BranchNotes: req.BranchNotes,
 	}
 
-	reviewer, err := s.newReviewer(ctx)
+	// Setup, from spawning the child through the thread call, has its own
+	// bound because the review timer has not started yet.
+	setupCtx, cancelSetup := context.WithTimeoutCause(ctx, s.setupTimeout, ErrSetupTimeout)
+	defer cancelSetup()
+	reviewer, err := s.newReviewer(setupCtx)
 	if err != nil {
-		return nil, err
+		return nil, setupError(setupCtx, err)
 	}
 	defer reviewer.Close()
 
 	var thread appserver.Thread
 	if known {
-		thread, err = reviewer.ResumeThread(ctx, wf.ThreadID, repo.Worktree)
+		thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
 		if err != nil {
-			return nil, fmt.Errorf("%w: workflow %s in %s: %w", ErrThreadUnavailable, key, s.store.Path(), err)
+			return nil, fmt.Errorf("%w: workflow %s in %s: %w", ErrThreadUnavailable, key, s.store.Path(), setupError(setupCtx, err))
 		}
 	} else {
-		thread, err = reviewer.StartThread(ctx, repo.Worktree)
+		thread, err = reviewer.StartThread(setupCtx, repo.Worktree)
 		if err != nil {
-			return nil, err
+			return nil, setupError(setupCtx, err)
 		}
 	}
+	cancelSetup()
 	s.log.Info("review turn starting", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
 		"model", thread.Model, "effort", thread.ReasoningEffort, "commit", target.Commit, "base", target.Base)
 
@@ -280,6 +288,36 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		Repo: repo.Worktree, Branch: branch.Ref, Commit: target.Commit, Base: target.Base,
 		Round: round, Review: rev.Text, Warnings: rev.Warnings,
 	}, nil
+}
+
+// incompleteWorkflowField names the first missing invariant of a stored
+// completed-review record, or "" when the record is complete. Values are
+// never echoed: they are untrusted state-file content.
+func incompleteWorkflowField(wf state.Workflow) string {
+	switch {
+	case wf.ThreadID == "":
+		return "thread_id"
+	case wf.LastCommit == "":
+		return "last_commit"
+	case wf.LastBase == "":
+		return "last_base"
+	case wf.LastRequestHash == "":
+		return "last_request_hash"
+	case wf.LastReview == "":
+		return "last_review"
+	case wf.Round < 1:
+		return "a round of at least 1"
+	}
+	return ""
+}
+
+// setupError attributes a setup failure to the setup deadline when that is
+// what ended it.
+func setupError(setupCtx context.Context, err error) error {
+	if errors.Is(context.Cause(setupCtx), ErrSetupTimeout) {
+		return fmt.Errorf("%w: %w", ErrSetupTimeout, err)
+	}
+	return err
 }
 
 // abbreviate shortens an identifier for logs.

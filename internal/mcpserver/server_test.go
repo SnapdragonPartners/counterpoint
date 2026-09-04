@@ -229,21 +229,62 @@ func TestLifecycleCancellationInterruptsActiveReview(t *testing.T) {
 }
 
 func TestBoundedLineReader(t *testing.T) {
-	limit := 16
-	ok := strings.Repeat("a", limit) + "\n" + strings.Repeat("b", limit) + "\n"
+	limit := 32
+	ok := `{"a":1}` + "\n" + "\n" + `{"b":"` + strings.Repeat("x", 20) + `"}` + "\n"
 	r := newBoundedLineReader(io.NopCloser(strings.NewReader(ok)), limit)
-	if data, err := io.ReadAll(r); err != nil || string(data) != ok {
-		t.Fatalf("lines at the limit: %q, %v", data, err)
+	data, err := io.ReadAll(r)
+	if err != nil || string(data) != `{"a":1}`+"\n"+`{"b":"`+strings.Repeat("x", 20)+`"}`+"\n" {
+		t.Fatalf("framed lines: %q, %v", data, err)
 	}
 
-	over := strings.Repeat("a", 4) + "\n" + strings.Repeat("c", limit+1) + "\n"
+	over := `{"a":1}` + "\n" + `{"c":"` + strings.Repeat("y", limit) + `"}` + "\n"
 	r = newBoundedLineReader(io.NopCloser(strings.NewReader(over)), limit)
-	_, err := io.ReadAll(r)
-	if !errors.Is(err, ErrRequestTooLarge) {
+	if _, err := io.ReadAll(r); !errors.Is(err, ErrRequestTooLarge) {
 		t.Fatalf("oversized line error = %v, want ErrRequestTooLarge", err)
 	}
 	if _, err := r.Read(make([]byte, 8)); !errors.Is(err, ErrRequestTooLarge) {
 		t.Errorf("reader recovered after an oversized line: %v", err)
+	}
+
+	// One JSON value spread over many short lines must not pass, however
+	// short each physical line is.
+	multi := "{\n" + `"a":` + "\n" + "1\n" + "}\n"
+	r = newBoundedLineReader(io.NopCloser(strings.NewReader(multi)), limit)
+	if _, err := io.ReadAll(r); !errors.Is(err, ErrRequestFraming) {
+		t.Fatalf("multiline value error = %v, want ErrRequestFraming", err)
+	}
+
+	unterminated := `{"a":1}`
+	r = newBoundedLineReader(io.NopCloser(strings.NewReader(unterminated)), limit)
+	if _, err := io.ReadAll(r); !errors.Is(err, ErrRequestFraming) {
+		t.Fatalf("unterminated line error = %v, want ErrRequestFraming", err)
+	}
+}
+
+func TestMultilineRequestEndsSession(t *testing.T) {
+	svc := review.New(review.Options{Store: state.NewStore(filepath.Join(t.TempDir(), "state.json")),
+		NewReviewer: func(context.Context) (review.Reviewer, error) { return stubReviewer{}, nil },
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil))})
+	server := New(context.Background(), svc, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Serve(context.Background(), server, inR, outW) }()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+
+	// Many short lines forming one value: a per-line bound alone would
+	// let this grow without limit.
+	go func() {
+		_, _ = io.WriteString(inW, "{\n\"jsonrpc\": \"2.0\",\n\"id\": 1,\n\"method\": \"tools/list\"\n}\n")
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRequestFraming) && (err == nil || !strings.Contains(err.Error(), "complete JSON value")) {
+			t.Fatalf("Serve returned %v, want the framing error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("session did not end on a multiline request")
 	}
 }
 

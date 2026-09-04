@@ -28,17 +28,26 @@ type fakeReviewer struct {
 	resumeErr     error
 	reviewErr     error
 	blockUntilCtx bool
+	stallSetup    bool // StartThread and ResumeThread block until ctx ends
 	warnings      []string
 }
 
-func (f *fakeReviewer) StartThread(_ context.Context, cwd string) (appserver.Thread, error) {
+func (f *fakeReviewer) StartThread(ctx context.Context, cwd string) (appserver.Thread, error) {
+	if f.stallSetup {
+		<-ctx.Done()
+		return appserver.Thread{}, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.started = append(f.started, cwd)
 	return appserver.Thread{ID: fmt.Sprintf("thr_%d", len(f.started)), Model: "fake", ReasoningEffort: "xhigh"}, nil
 }
 
-func (f *fakeReviewer) ResumeThread(_ context.Context, id, cwd string) (appserver.Thread, error) {
+func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appserver.Thread, error) {
+	if f.stallSetup {
+		<-ctx.Done()
+		return appserver.Thread{}, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.resumeErr != nil {
@@ -337,22 +346,82 @@ func TestMovedMergeBaseIsANewRound(t *testing.T) {
 }
 
 func TestIncompleteStoredWorkflowFailsClosed(t *testing.T) {
-	h := newHarness(t)
-	tip := h.repo.git("rev-parse", "HEAD")
-	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
-	key := gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
-	st, _ := h.store.Load()
-	st.Put(key, state.Workflow{ThreadID: "", LastCommit: tip, Round: 1, LastReview: "r"})
-	if err := h.store.Save(st); err != nil {
-		t.Fatal(err)
+	complete := func(tip, hash string) state.Workflow {
+		return state.Workflow{ThreadID: "thr_1", LastCommit: tip, LastBase: "b", LastRequestHash: hash, Round: 1, LastReview: "prior review"}
 	}
+	cases := map[string]func(w *state.Workflow){
+		"thread_id":         func(w *state.Workflow) { w.ThreadID = "" },
+		"last_commit":       func(w *state.Workflow) { w.LastCommit = "" },
+		"last_base":         func(w *state.Workflow) { w.LastBase = "" },
+		"last_request_hash": func(w *state.Workflow) { w.LastRequestHash = "" },
+		"last_review":       func(w *state.Workflow) { w.LastReview = "" },
+		"round":             func(w *state.Workflow) { w.Round = 0 },
+	}
+	for field, damage := range cases {
+		t.Run(field, func(t *testing.T) {
+			h := newHarness(t)
+			tip := h.repo.git("rev-parse", "HEAD")
+			repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
+			key := gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
+			// The stored hash matches the request so that a damaged review
+			// would otherwise replay, and a damaged hash would otherwise run.
+			target, _ := repo.ValidateTarget(context.Background(), "feature", tip, "")
+			hash := state.Request{Identity: repo.Identity(), BranchRef: "refs/heads/feature", Commit: tip, Base: target.Base, BranchNotes: "notes"}.Hash()
+			wf := complete(tip, hash)
+			damage(&wf)
+			st, _ := h.store.Load()
+			st.Put(key, wf)
+			if err := h.store.Save(st); err != nil {
+				t.Fatal(err)
+			}
 
-	_, err := h.svc.Review(context.Background(), h.request(tip, "r2"))
-	if !errors.Is(err, ErrStateInvalid) || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), h.store.Path()) {
-		t.Fatalf("error = %v, want ErrStateInvalid naming the workflow and state file", err)
+			res, err := h.svc.Review(context.Background(), h.request(tip, "notes"))
+			if !errors.Is(err, ErrStateInvalid) || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), h.store.Path()) {
+				t.Fatalf("error = %v (result %+v), want ErrStateInvalid naming the workflow and state file", err, res)
+			}
+			if strings.Contains(err.Error(), "prior review") || strings.Contains(err.Error(), "thr_1") {
+				t.Errorf("error echoes stored values: %v", err)
+			}
+			if h.spawns != 0 {
+				t.Error("a Codex turn was attempted on incomplete state")
+			}
+		})
 	}
-	if h.spawns != 0 || len(h.reviewer.started) != 0 {
-		t.Error("a replacement thread was started for incomplete state")
+}
+
+func TestSetupTimeoutCoversThreadCalls(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		h := newHarness(t)
+		tip := h.repo.git("rev-parse", "HEAD")
+		if resume {
+			if _, err := h.svc.Review(context.Background(), h.request(tip, "r1")); err != nil {
+				t.Fatal(err)
+			}
+			tip = h.repo.commit("feature-2")
+		}
+		h.svc.setupTimeout = 200 * time.Millisecond
+		h.reviewer.stallSetup = true
+		before := h.reviewer.closed
+
+		start := time.Now()
+		_, err := h.svc.Review(context.Background(), h.request(tip, "r2"))
+		if !errors.Is(err, ErrSetupTimeout) {
+			t.Fatalf("resume=%v: error = %v, want ErrSetupTimeout", resume, err)
+		}
+		if resume && !errors.Is(err, ErrThreadUnavailable) {
+			t.Errorf("resume=%v: error = %v, want ErrThreadUnavailable as well", resume, err)
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Errorf("resume=%v: setup stall not bounded", resume)
+		}
+		if h.reviewer.closed != before+1 {
+			t.Errorf("resume=%v: reviewer not closed after setup timeout", resume)
+		}
+		if l, err := state.AcquireLock(context.Background(), h.store.LockPath(), time.Second); err != nil {
+			t.Errorf("resume=%v: lock not released: %v", resume, err)
+		} else {
+			_ = l.Release()
+		}
 	}
 }
 
