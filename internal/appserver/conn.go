@@ -49,10 +49,13 @@ type conn struct {
 	stdin io.WriteCloser
 	log   *slog.Logger
 
-	// outbox feeds the single writer goroutine; writerDone closes when it
-	// exits.
+	// outbox feeds the single writer goroutine. stopWriter tells it to
+	// exit; writerDone closes when it has.
 	outbox     chan []byte
+	stopWriter chan struct{}
+	stopOnce   sync.Once
 	writerDone chan struct{}
+	killOnce   sync.Once
 
 	nextID atomic.Int64
 
@@ -91,6 +94,7 @@ func spawn(ctx context.Context, command string, args []string, stderr io.Writer,
 		stdin:      stdin,
 		log:        log,
 		outbox:     make(chan []byte, outboxSize),
+		stopWriter: make(chan struct{}),
 		writerDone: make(chan struct{}),
 		pending:    map[int64]chan envelope{},
 		handlers:   map[int64]notificationHandler{},
@@ -141,23 +145,52 @@ func (c *conn) readLoop(stdout io.Reader) {
 	// prove it. An oversized line leaves the pipe unread; the child must
 	// be ended before Wait can return.
 	if !errors.Is(err, ErrProcessExited) {
-		_ = c.cmd.Process.Kill()
+		c.kill()
 	}
 	_ = c.cmd.Wait()
 	close(c.waitDone)
 }
 
 // writeLoop is the single stdin writer. A blocked pipe blocks only this
-// goroutine; callers wait on their own contexts. It exits when the outbox
-// is closed, when a write fails, or when stdin is closed by close.
+// goroutine; callers wait on their own contexts. It exits when told to
+// stop or when a write fails, and a failed write terminates the connection
+// so pending and future calls fail instead of waiting on a dead queue.
 func (c *conn) writeLoop() {
 	defer close(c.writerDone)
-	for data := range c.outbox {
-		if _, err := c.stdin.Write(data); err != nil {
-			c.log.Warn("app-server: write failed", "error", err)
+	for {
+		select {
+		case <-c.stopWriter:
 			return
+		case data := <-c.outbox:
+			if _, err := c.stdin.Write(data); err != nil {
+				c.terminate(fmt.Errorf("write to app-server: %w", err))
+				return
+			}
 		}
 	}
+}
+
+// terminate ends the connection for a reason of Counterpoint's own: the
+// reason is recorded first so it wins over the generic exit error, the
+// writer is stopped, and the child is killed. The reader then reaches EOF,
+// fails every pending call, and reaps the process.
+func (c *conn) terminate(err error) {
+	c.mu.Lock()
+	if c.exitErr == nil {
+		c.exitErr = err
+	}
+	c.mu.Unlock()
+	c.log.Warn("app-server: terminating connection", "error", err)
+	c.stopWriting()
+	c.kill()
+}
+
+func (c *conn) stopWriting() {
+	c.stopOnce.Do(func() { close(c.stopWriter) })
+}
+
+func (c *conn) kill() {
+	c.killOnce.Do(func() { _ = c.cmd.Process.Kill() })
 }
 
 func (c *conn) dispatch(env *envelope) {
@@ -194,10 +227,15 @@ func (c *conn) dispatch(env *envelope) {
 	}
 }
 
-// shutdown records why the reader ended and fails every pending call.
+// shutdown records why the reader ended, unless terminate already
+// recorded a more specific reason, fails every pending call, and stops the
+// writer.
 func (c *conn) shutdown(err error) {
 	c.mu.Lock()
-	c.exitErr = err
+	if c.exitErr == nil {
+		c.exitErr = err
+	}
+	err = c.exitErr
 	pending := c.pending
 	c.pending = map[int64]chan envelope{}
 	c.mu.Unlock()
@@ -205,6 +243,7 @@ func (c *conn) shutdown(err error) {
 		ch <- envelope{Error: &rpcError{Message: err.Error()}}
 	}
 	close(c.closed)
+	c.stopWriting()
 }
 
 // call sends a request and waits for its response, honoring ctx and the
@@ -262,7 +301,9 @@ func (c *conn) notify(ctx context.Context, method string, params any) error {
 }
 
 // send encodes one message as a single line and queues it for the writer,
-// giving up when ctx ends or the connection closes.
+// giving up when ctx ends or the connection is closing. A message that
+// slips into the queue as the writer dies is harmless: the caller waits
+// on closed, which fires once the reader has shut down.
 func (c *conn) send(ctx context.Context, msg any) error {
 	data, err := encodeLine(msg)
 	if err != nil {
@@ -270,6 +311,8 @@ func (c *conn) send(ctx context.Context, msg any) error {
 	}
 	select {
 	case <-c.closed:
+		return c.closedErr()
+	case <-c.writerDone:
 		return c.closedErr()
 	default:
 	}
@@ -281,23 +324,24 @@ func (c *conn) send(ctx context.Context, msg any) error {
 	case <-c.closed:
 		return c.closedErr()
 	case <-c.writerDone:
-		return ErrClosed
+		return c.closedErr()
 	}
 }
 
-// sendFromReader queues a message without ever blocking the reader
-// goroutine. When the outbox is full the child is not consuming input, so
-// the message is dropped with a warning rather than stalling dispatch.
+// sendFromReader queues a reply to a server-originated request without
+// blocking the reader goroutine. A full outbox means the child has stopped
+// consuming input while still asking questions; dropping the reply would
+// let it wait forever, so the connection is terminated instead.
 func (c *conn) sendFromReader(msg any) {
 	data, err := encodeLine(msg)
 	if err != nil {
-		c.log.Warn("app-server: cannot encode response to server request", "error", err)
+		c.terminate(fmt.Errorf("encode response to server request: %w", err))
 		return
 	}
 	select {
 	case c.outbox <- data:
 	default:
-		c.log.Warn("app-server: dropped response to server request", "error", ErrWriteBacklog)
+		c.terminate(ErrWriteBacklog)
 	}
 }
 
@@ -397,15 +441,18 @@ func (c *conn) takeWarnings() []string {
 	return w
 }
 
-// close ends the child. Stdin is closed so a well-behaved child exits and
-// a writer blocked on a full pipe is released; after closeGrace the child
-// is killed. It returns once stdout is drained and the process is reaped.
+// close ends the child. The writer is told to stop and stdin is closed so
+// a well-behaved child exits and a writer blocked on a full pipe is
+// released; after closeGrace the child is killed. It returns once stdout
+// is drained, the process is reaped, and the writer has exited.
 func (c *conn) close() {
+	c.stopWriting()
 	_ = c.stdin.Close()
 	select {
 	case <-c.waitDone:
 	case <-time.After(closeGrace):
-		_ = c.cmd.Process.Kill()
+		c.kill()
 		<-c.waitDone
 	}
+	<-c.writerDone
 }

@@ -421,3 +421,90 @@ func TestCodexErrorCodeRendering(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveCwdMismatchFailsClosed(t *testing.T) {
+	cl, _ := fakeClient(t, "wrong-cwd", "")
+	_, err := cl.StartThread(context.Background(), "/work/tree")
+	if !errors.Is(err, ErrPolicyMismatch) {
+		t.Fatalf("StartThread error = %v, want ErrPolicyMismatch", err)
+	}
+}
+
+func TestMissingReviewThreadIDIsRejected(t *testing.T) {
+	cl, _ := fakeClient(t, "no-review-thread", "")
+	th := startThread(t, cl)
+	_, err := cl.Review(context.Background(), th.ID, "x")
+	if !errors.Is(err, ErrPolicyMismatch) {
+		t.Fatalf("Review error = %v, want ErrPolicyMismatch", err)
+	}
+}
+
+func TestCancellationBeforeResponseInterruptsKnownTurn(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "threads")
+	cl, _ := fakeClient(t, "started-then-stall", statePath)
+	th := startThread(t, cl)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	_, err := cl.Review(ctx, th.ID, "x")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Review error = %v, want DeadlineExceeded", err)
+	}
+	events, _ := os.ReadFile(statePath + ".events")
+	if !strings.Contains(string(events), "interrupt:turn_1") {
+		t.Errorf("the turn that started before the response was not interrupted; events: %q", events)
+	}
+}
+
+func TestServerRequestBacklogTerminatesConnection(t *testing.T) {
+	cl, _ := fakeClient(t, "flood", "")
+	startThread(t, cl) // the child now waits for our next bytes, then floods
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cl.Review(context.Background(), "thr_1", strings.Repeat("i", 4<<20))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrWriteBacklog) {
+			t.Fatalf("Review error = %v, want ErrWriteBacklog", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Review did not fail although the child stopped reading while asking questions")
+	}
+
+	start := time.Now()
+	cl.Close()
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("Close took %v after termination, want prompt", elapsed)
+	}
+	select {
+	case <-cl.c.writerDone:
+	default:
+		t.Error("writer still running after Close")
+	}
+}
+
+func TestWriterExitsOnCloseAndOnChildExit(t *testing.T) {
+	cl, _ := fakeClient(t, "normal", "")
+	startThread(t, cl)
+	cl.Close()
+	select {
+	case <-cl.c.writerDone:
+	default:
+		t.Error("writer still running after Close of an idle connection")
+	}
+
+	cl2, _ := fakeClient(t, "exit", "")
+	th := startThread(t, cl2)
+	_, _ = cl2.Review(context.Background(), th.ID, "x")
+	select {
+	case <-cl2.c.writerDone:
+	case <-time.After(2 * time.Second):
+		t.Error("writer still running after the child exited")
+	}
+	if _, err := cl2.StartThread(context.Background(), "/work/tree"); !errors.Is(err, ErrProcessExited) {
+		t.Errorf("send after child exit error = %v, want ErrProcessExited", err)
+	}
+}

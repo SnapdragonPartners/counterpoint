@@ -242,10 +242,26 @@ func (f *fakeServer) handleThreadStart(env *envelope) {
 
 	// reorder: answer the second request first, then the held first one.
 	result := f.threadResult(id, p.Cwd)
-	if f.scenario == "wrong-policy" {
+	switch f.scenario {
+	case "wrong-policy":
 		result["sandbox"] = map[string]any{"type": "workspaceWrite", "networkAccess": true}
+	case "wrong-cwd":
+		result["cwd"] = "/somewhere/else"
 	}
 	f.respond(env.ID, result)
+	if f.scenario == "flood" {
+		// Wait until the client starts sending its next message, then stop
+		// reading and ask questions faster than the blocked client can
+		// answer them. A single raw read is safe here: the scanner has
+		// consumed exactly the thread/start line and nothing else has been
+		// sent yet.
+		_, _ = os.Stdin.Read(make([]byte, 64*1024))
+		for i := 0; i < 3*outboxSize; i++ {
+			f.send(map[string]any{"id": fmt.Sprintf("flood-%d", i), "method": "item/commandExecution/requestApproval",
+				"params": map[string]any{"threadId": id, "turnId": "turn_x", "itemId": "c", "startedAtMs": 1}})
+		}
+		time.Sleep(time.Hour)
+	}
 	if f.scenario == "deaf" {
 		// Stop consuming stdin; the handler runs on the read loop. A sleep
 		// rather than select{} so the runtime's deadlock detector does not
@@ -304,15 +320,32 @@ func (f *fakeServer) handleReviewStart(env *envelope) {
 	}
 
 	threadID := p.ThreadID
-	if f.scenario == "wrong-thread" {
+	reviewThreadID := threadID
+	switch f.scenario {
+	case "wrong-thread":
 		threadID = "thr_detached"
+		reviewThreadID = threadID
+	case "no-review-thread":
+		reviewThreadID = ""
 	}
 	turn := map[string]any{"id": turnID, "status": "inProgress", "items": []any{}}
 	if f.scenario == "notify-first" {
 		f.notify("turn/started", map[string]any{"threadId": threadID, "turn": turn})
 		f.notify("item/agentMessage/delta", map[string]any{"threadId": threadID, "turnId": turnID, "itemId": "m1", "delta": "early "})
 	}
-	f.respond(env.ID, map[string]any{"reviewThreadId": threadID, "turn": turn})
+	if f.scenario == "started-then-stall" {
+		// The turn is running before the response exists. Hold the
+		// response until the client interrupts the turn it learned about
+		// from turn/started.
+		f.notify("turn/started", map[string]any{"threadId": threadID, "turn": turn})
+		go func() {
+			<-interrupt
+			f.notify("turn/completed", map[string]any{"threadId": threadID, "turn": map[string]any{"id": turnID, "status": "interrupted", "items": []any{}}})
+			f.fail(env.ID, -32000, "turn interrupted before the response was sent")
+		}()
+		return
+	}
+	f.respond(env.ID, map[string]any{"reviewThreadId": reviewThreadID, "turn": turn})
 	go f.runTurn(threadID, turnID, p.Target.Instructions, interrupt)
 }
 

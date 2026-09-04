@@ -125,6 +125,7 @@ type threadResponse struct {
 	ReasoningEffort *string         `json:"reasoningEffort"`
 	ApprovalPolicy  json.RawMessage `json:"approvalPolicy"`
 	Sandbox         sandboxPolicy   `json:"sandbox"`
+	Cwd             string          `json:"cwd"`
 }
 
 // sandboxPolicy is the effective sandbox reported on thread responses.

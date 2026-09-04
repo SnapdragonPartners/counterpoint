@@ -134,7 +134,7 @@ func (cl *Client) StartThread(ctx context.Context, cwd string) (Thread, error) {
 	if err := cl.c.call(ctx, methodThreadStart, params, &resp); err != nil {
 		return Thread{}, err
 	}
-	return threadFromResponse(resp)
+	return threadFromResponse(resp, cwd)
 }
 
 // ResumeThread resumes threadID at cwd with the same sandbox and approval
@@ -146,15 +146,19 @@ func (cl *Client) ResumeThread(ctx context.Context, threadID, cwd string) (Threa
 	if err := cl.c.call(ctx, methodThreadResume, params, &resp); err != nil {
 		return Thread{}, err
 	}
-	return threadFromResponse(resp)
+	return threadFromResponse(resp, cwd)
 }
 
-// threadFromResponse validates the effective policy the server reports and
-// fails closed unless it is the read-only sandbox without network access
-// and the never approval policy.
-func threadFromResponse(resp threadResponse) (Thread, error) {
+// threadFromResponse validates what the server reports back and fails
+// closed unless the effective policy is the read-only sandbox without
+// network access with the never approval policy, and the effective working
+// directory is exactly the canonical path that was requested.
+func threadFromResponse(resp threadResponse, requestedCwd string) (Thread, error) {
 	if resp.Thread.ID == "" {
 		return Thread{}, fmt.Errorf("%w: thread response has no id", ErrIncompatible)
+	}
+	if resp.Cwd != requestedCwd {
+		return Thread{}, fmt.Errorf("%w: effective cwd is %q, requested %q", ErrPolicyMismatch, resp.Cwd, requestedCwd)
 	}
 	var approval string
 	if err := json.Unmarshal(resp.ApprovalPolicy, &approval); err != nil || approval != approvalNever {
@@ -186,13 +190,20 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		Delivery: reviewDeliveryInline,
 	}
 	if err := cl.c.call(ctx, methodReviewStart, params, &resp); err != nil {
+		// The turn may already be running if turn/started arrived before
+		// the response; on cancellation, stop it rather than leave it.
+		if ctx.Err() != nil {
+			if known := w.knownTurn(); known != "" {
+				cl.interrupt(ctx, threadID, known, w)
+			}
+		}
 		return nil, err
 	}
 	if resp.Turn.ID == "" {
-		return nil, errors.New("review/start returned no turn id")
+		return nil, fmt.Errorf("%w: review/start returned no turn id", ErrIncompatible)
 	}
-	if resp.ReviewThreadID != "" && resp.ReviewThreadID != threadID {
-		return nil, fmt.Errorf("review/start ran on thread %s, expected %s", resp.ReviewThreadID, threadID)
+	if resp.ReviewThreadID != threadID {
+		return nil, fmt.Errorf("%w: review/start ran on thread %q, expected the persistent thread %q", ErrPolicyMismatch, resp.ReviewThreadID, threadID)
 	}
 	w.setTurn(resp.Turn.ID)
 
@@ -265,6 +276,13 @@ type turnWatcher struct {
 
 func newTurnWatcher(threadID string) *turnWatcher {
 	return &turnWatcher{threadID: threadID, done: make(chan struct{})}
+}
+
+// knownTurn returns the turn id learned from turn/started, if any.
+func (w *turnWatcher) knownTurn() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.turnID
 }
 
 func (w *turnWatcher) setTurn(id string) {
