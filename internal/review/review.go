@@ -81,6 +81,9 @@ type Reviewer interface {
 	ResumeThread(ctx context.Context, threadID, cwd string) (appserver.Thread, error)
 	UnarchiveThread(ctx context.Context, threadID string) error
 	SetThreadName(ctx context.Context, threadID, name string) error
+	// AddWarning queues a bridge-level warning for the next Review result
+	// under the same bounds as the reviewer's own warnings.
+	AddWarning(w string)
 	Review(ctx context.Context, threadID, instructions string) (*appserver.Review, error)
 	Close()
 }
@@ -262,11 +265,13 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	defer reviewer.Close()
 
 	var thread appserver.Thread
-	var setupWarnings []string
 	if known {
 		thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
 		var refused *appserver.ServerError
-		if errors.As(err, &refused) {
+		// The setup context is checked before each recovery call: an
+		// aborted review must not go on to change the thread's archival
+		// state, and a call on an ended context could still be sent.
+		if errors.As(err, &refused) && setupCtx.Err() == nil {
 			// The app-server refused the resume. An archived thread is the
 			// human's handoff (issue #8): archiving in the Codex app
 			// releases the thread's writer, and unarchiving from here takes
@@ -276,9 +281,9 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 			// writer another process holds; then the resume failure stands.
 			if uerr := reviewer.UnarchiveThread(setupCtx, wf.ThreadID); uerr != nil {
 				s.log.Info("stored thread was not unarchived", "request", requestID, "workflow", key, "thread", abbreviate(wf.ThreadID), "error", uerr)
-			} else {
+			} else if setupCtx.Err() == nil {
 				s.log.Info("stored thread unarchived", "request", requestID, "workflow", key, "thread", abbreviate(wf.ThreadID))
-				setupWarnings = append(setupWarnings, "the stored Codex thread was archived; Counterpoint unarchived it and resumed the review there")
+				reviewer.AddWarning("the stored Codex thread was archived; Counterpoint unarchived it and resumed the review there")
 				thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
 			}
 		}
@@ -298,13 +303,15 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 			return nil, setupError(setupCtx, err)
 		}
 		// The name marks the thread in the Codex UIs as Counterpoint's so
-		// it is left alone. It is not required for the review.
+		// it is left alone. It is not required for the review. The server's
+		// message goes to the log only; the warning is a fixed string so
+		// untrusted output cannot fill the warning budget.
 		if nerr := reviewer.SetThreadName(setupCtx, thread.ID, threadName(repo.Worktree, branch.Ref)); nerr != nil {
 			if setupCtx.Err() != nil {
 				return nil, setupError(setupCtx, nerr)
 			}
 			s.log.Warn("thread not named", "request", requestID, "workflow", key, "thread", abbreviate(thread.ID), "error", nerr)
-			setupWarnings = append(setupWarnings, "the new Codex thread could not be named: "+nerr.Error())
+			reviewer.AddWarning("the new Codex thread could not be named; see the Counterpoint log")
 		}
 	}
 	cancelSetup()
@@ -328,7 +335,6 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 
-	rev.Warnings = append(setupWarnings, rev.Warnings...)
 	st.Put(key, state.Workflow{
 		ThreadID:        thread.ID,
 		LastCommit:      target.Commit,
@@ -371,13 +377,20 @@ func incompleteWorkflowField(wf state.Workflow) string {
 	return ""
 }
 
-// setupError attributes a setup failure to the setup deadline when that is
-// what ended it.
+// setupError attributes a setup failure to whatever ended the setup
+// context, when it ended: the setup deadline or the caller's cancellation.
+// A call can return its own error, such as a server refusal, in the same
+// instant the context ends; the outcome is still the abort.
 func setupError(setupCtx context.Context, err error) error {
-	if errors.Is(context.Cause(setupCtx), ErrSetupTimeout) {
+	cause := context.Cause(setupCtx)
+	switch {
+	case cause == nil || errors.Is(err, cause):
+		return err
+	case errors.Is(cause, ErrSetupTimeout):
 		return fmt.Errorf("%w: %w", ErrSetupTimeout, err)
+	default:
+		return fmt.Errorf("%w: %w", cause, err)
 	}
-	return err
 }
 
 // threadName is the Codex UI name for a workflow's thread.

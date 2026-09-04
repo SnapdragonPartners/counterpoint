@@ -248,6 +248,33 @@ func TestSetThreadName(t *testing.T) {
 	}
 }
 
+func TestAddWarningSharesTheWarningBudget(t *testing.T) {
+	cl, _ := fakeClient(t, "normal", "")
+	th := startThread(t, cl)
+	cl.AddWarning("setup: first")
+	cl.AddWarning(strings.Repeat("x", maxWarningBytes)) // alone it would exceed the byte cap
+	for i := 0; i < maxWarnings; i++ {
+		cl.AddWarning(fmt.Sprintf("setup: %d", i))
+	}
+	rev, err := cl.Review(context.Background(), th.ID, "round 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rev.Warnings) != maxWarnings+1 || rev.Warnings[0] != "setup: first" {
+		t.Fatalf("warnings = %d entries starting %q, want %d plus the omitted marker", len(rev.Warnings), rev.Warnings[0], maxWarnings)
+	}
+	if last := rev.Warnings[maxWarnings]; !strings.Contains(last, "2 additional") || !strings.Contains(last, "omitted") {
+		t.Errorf("last warning = %q, want a marker for 2 omitted entries", last)
+	}
+	var total int
+	for _, w := range rev.Warnings[:maxWarnings] {
+		total += len(w)
+	}
+	if total > maxWarningBytes {
+		t.Errorf("kept warnings total %d bytes, over the %d cap", total, maxWarningBytes)
+	}
+}
+
 func TestServerRequestsAreDeclinedAndReported(t *testing.T) {
 	cl, stderr := fakeClient(t, "approval", "")
 	th := startThread(t, cl)

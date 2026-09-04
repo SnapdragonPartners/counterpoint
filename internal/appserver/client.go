@@ -179,6 +179,14 @@ func (cl *Client) SetThreadName(ctx context.Context, threadID, name string) erro
 	return cl.c.call(ctx, methodThreadNameSet, threadNameSetParams{ThreadID: threadID, Name: name}, nil)
 }
 
+// AddWarning records a bridge-level warning for the next Review result.
+// It shares the bounds and the omitted-count marker of the warnings the
+// client raises itself, so callers cannot grow the list past the contract.
+func (cl *Client) AddWarning(w string) {
+	cl.log.Warn(w)
+	cl.c.recordWarning(w)
+}
+
 // threadFromResponse validates what the server reports back and fails
 // closed unless the effective policy is the read-only sandbox without
 // network access with the never approval policy, and the effective working

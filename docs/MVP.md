@@ -430,8 +430,12 @@ succeeds, resumes again. Unarchiving is not idempotent and itself needs the
 writer, so it fails for a thread that is not archived or that another process
 holds, and the original refusal stands. The retry does not inspect error text.
 A refusal that is a transport or process failure rather than an app-server
-answer gets no unarchive attempt. A successful unarchive is reported in the
-response `warnings` and persisted with the round.
+answer gets no unarchive attempt, and neither does a review whose context has
+already ended, so an aborted call never changes the thread's archival state.
+A successful unarchive is reported in the response `warnings` and persisted
+with the round. Warnings raised by Counterpoint itself, including this one
+and a refused thread name, are fixed strings that share the app-server
+warning bounds; they never carry model or server output.
 
 If the thread still cannot be resumed, Counterpoint fails closed. It does not
 start a replacement thread, because silently discarding retained review

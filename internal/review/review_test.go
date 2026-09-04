@@ -37,10 +37,11 @@ type fakeReviewer struct {
 	omitEffort    bool // ResumeThread reports no reasoning effort, as codex-cli 0.153.1 does
 	warnings      []string
 
-	unarchived   []string
-	unarchiveErr error // nil: unarchive succeeds and the thread resumes afterwards
-	named        []string
-	nameErr      error
+	unarchived     []string
+	unarchiveErr   error              // nil: unarchive succeeds and the thread resumes afterwards
+	cancelOnResume context.CancelFunc // called before a scripted resume failure is returned
+	named          []string
+	nameErr        error
 }
 
 func (f *fakeReviewer) StartThread(ctx context.Context, cwd string) (appserver.Thread, error) {
@@ -62,6 +63,10 @@ func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appser
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.resumeErr != nil {
+		if f.cancelOnResume != nil {
+			// The request ends just as the refusal arrives.
+			f.cancelOnResume()
+		}
 		return appserver.Thread{}, f.resumeErr
 	}
 	f.resumed = append(f.resumed, id+"@"+cwd)
@@ -88,6 +93,12 @@ func (f *fakeReviewer) SetThreadName(_ context.Context, id, name string) error {
 	defer f.mu.Unlock()
 	f.named = append(f.named, id+":"+name)
 	return f.nameErr
+}
+
+func (f *fakeReviewer) AddWarning(w string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.warnings = append(f.warnings, w)
 }
 
 func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string) (*appserver.Review, error) {
@@ -373,6 +384,26 @@ func TestTransportResumeFailureSkipsUnarchive(t *testing.T) {
 	}
 	if len(h.reviewer.unarchived) != 0 {
 		t.Errorf("unarchive attempted after a transport failure: %v", h.reviewer.unarchived)
+	}
+}
+
+func TestCancelledResumeDoesNotUnarchive(t *testing.T) {
+	h := newHarness(t)
+	first := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.reviewer.resumeErr = &appserver.ServerError{Code: -32600, Message: "session thr_1 is archived. Run `codex unarchive thr_1` to unarchive it first."}
+	h.reviewer.cancelOnResume = cancel
+	second := h.repo.commit("feature-2")
+	_, err := h.svc.Review(ctx, h.request(second, "r2"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want the cancellation", err)
+	}
+	if len(h.reviewer.unarchived) != 0 {
+		t.Errorf("an aborted review changed the thread's archival state: %v", h.reviewer.unarchived)
 	}
 }
 

@@ -452,6 +452,11 @@ func truncateIdentifier(id string) string {
 // way, since logs are bounded by the operator, not by this process.
 func (c *conn) addWarning(w string) {
 	c.log.Warn("app-server: " + w)
+	c.recordWarning(w)
+}
+
+// recordWarning applies the warning bounds without logging.
+func (c *conn) recordWarning(w string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.warnings) >= maxWarnings || c.warningBytes+len(w) > maxWarningBytes {
