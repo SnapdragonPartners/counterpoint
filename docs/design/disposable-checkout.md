@@ -50,30 +50,62 @@ With `build: true`, after validation and inside the review lock:
 
 1. Resolve the scratch root: `os.UserCacheDir()/counterpoint/checkouts`,
    created `0700`. `COUNTERPOINT_CHECKOUT_DIR` overrides it for tests and
-   unusual installations, mirroring `COUNTERPOINT_STATE_FILE`.
+   unusual installations, mirroring `COUNTERPOINT_STATE_FILE`. The root is
+   canonicalized (symlinks resolved) before anything is created, and the
+   review fails if the root lies inside the repository's worktree or common
+   Git directory, or contains either of them. Otherwise an override could
+   make Counterpoint write its scratch, and leave its persistent cache,
+   inside the reviewed repository.
 2. Derive one directory per workflow key, `<root>/<sha256 of key, 16 hex>`,
-   with two children: `checkout/`, recreated every round, and `cache/`,
-   persistent across rounds.
-3. Remove any existing `checkout/` (a crash remnant from an earlier round),
-   then `git clone --shared --no-checkout <common dir> checkout` followed by
-   `git -C checkout checkout --detach <commit>`. Measured on this repository:
-   0.1 s and 500 KB, with no write into the source repository. A shared clone
-   reads objects through an alternates link to the source object store; the
+   with three children: `checkout/`, recreated every round; `cache/`,
+   persistent across rounds; and `lock`, an advisory file lock on the
+   directory itself.
+3. Acquire `lock` with the same bounded wait as the review lock, and hold it
+   through cleanup. The review lock lives beside the state file, and two
+   installations with different `COUNTERPOINT_STATE_FILE` values but the
+   default scratch root would hash a workflow to the same directory; the
+   lock is keyed to the resource actually shared. A held lock fails the call
+   with a clear message rather than queueing.
+4. Remove any existing `checkout/` (a crash remnant from an earlier round),
+   then populate it with Git configuration isolated from the user's:
+   `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointed at `/dev/null`,
+   `--template=` empty, and `core.hooksPath` set to an empty directory under
+   the workflow directory. `git clone --shared --no-checkout <common dir>
+   checkout` is followed by `git -C checkout checkout --detach <commit>`.
+   The isolation matters because checkout runs before Codex's sandbox
+   exists: a global `post-checkout` hook, a hooks path, or a filter such as
+   Git LFS named by a tracked `.gitattributes` would otherwise execute
+   arbitrary code, possibly with network access, on Counterpoint's behalf.
+   With no filter definitions, attribute-declared filters are inert and
+   pointer files stay pointer files. Measured on this repository: 0.1 s and
+   500 KB, with no write into the source repository. A shared clone reads
+   objects through an alternates link to the source object store; the
    dependency is documented and only lasts for the review. `--dissociate`
    would copy the store and is rejected for cost. `git worktree add` is
    rejected because it writes into the source repository's `.git`.
-4. Start or resume the thread with cwd `checkout/` and sandbox
+5. Create `checkout/.counterpoint-tmp` with mode `0700` for the reviewer's
+   `TMPDIR`. Setting the variable does not create the directory, and Go and
+   most test runners fail with `ENOENT` without one. If the commit tracks a
+   path of that name, the review fails rather than reuse it. The
+   implementation test writes a temporary file through the configured path.
+6. Start or resume the thread with cwd `checkout/` and sandbox
    `workspace-write`, with the policy overrides below.
-5. Run the review turn.
-6. On every exit path, including timeout, cancellation, and errors after step
-   3, remove `checkout/`. `cache/` is kept.
+7. Run the review turn.
+8. After the turn, run `git status --porcelain --untracked-files=no` in the
+   checkout. Any modified tracked file means the reviewer's results may not
+   describe the immutable commit; the count is reported as a warning and
+   logged. Untracked files, including build output and the temp directory,
+   are expected and ignored.
+9. On every exit path, including timeout, cancellation, and errors after step
+   4, remove `checkout/` and the hooks directory. `cache/` is kept. Release
+   `lock` last.
 
 A stable per-workflow path is chosen over a unique directory per turn. The
-cross-process review lock already serializes reviews, so no other process can
-be using the directory; the thread keeps one cwd across rounds; and removing
+resource lock serializes use of the directory across processes and
+installations; the thread keeps one cwd across rounds; and removing
 `checkout/` before creating it cleans up a crashed round without a separate
 garbage collector. Removal only ever targets a path Counterpoint composed
-under its own root, after checking that no component is a symlink.
+under its own canonical root, after checking that no component is a symlink.
 
 ## Sandbox policy and its validation
 
@@ -107,8 +139,12 @@ Counterpoint sets, through `shell_environment_policy.set`:
 The prompt tells the reviewer that it may build and test in its cwd, that
 network is off, that `$COUNTERPOINT_CACHE_DIR` is the one writable location
 outside the checkout and is meant for build caches, and gives Go as the
-example:
-`GOCACHE=$COUNTERPOINT_CACHE_DIR/go-build GOPROXY=off GOFLAGS=-mod=mod`.
+example: `GOCACHE=$COUNTERPOINT_CACHE_DIR/go-build GOPROXY=off`. With the
+proxy off, Go's default read-only module mode fails fast on a missing
+module instead of hanging. `-mod=mod` is deliberately not suggested: it lets
+the toolchain rewrite `go.mod` and `go.sum` in the writable checkout, so
+tests could pass against a tree that differs from the commit. Step 8 above
+catches any such rewrite anyway and reports it.
 Counterpoint does not set Go variables itself, so it stays language-neutral;
 the recommendation lives in the prompt where it can be wrong without breaking
 anything. Open question for review: whether setting `GOCACHE` directly is
@@ -131,15 +167,26 @@ test results from the checkout are evidence the reviewer may cite. With
 
 ## Request identity and state
 
-`state.Request` gains the `Build` flag and it enters the hash. The persisted
-workflow record does not need the flag; the mode of the last round is not
-used by the next one. State version stays 1 because no stored field changes.
+`state.Request` gains the `Build` flag. It enters the hash only when true,
+as one extra length-prefixed field after the notes, so every hash computed
+before this change is unchanged for `build: false` and an identical retry of
+a pre-upgrade round still replays instead of starting a paid turn. A test
+pins the legacy encoding with a fixture hash computed by the current code.
+The persisted workflow record does not need the flag; the mode of the last
+round is not used by the next one. State version stays 1 because no stored
+field changes.
 
 ## Failure modes
 
+- Scratch root overlaps the repository, is a symlink, or cannot be created:
+  the review fails before cloning.
+- The workflow directory's lock is held by another process: the review fails
+  with a clear message, before cloning.
 - Clone or checkout fails (for example a missing object): the review fails
   before contacting Codex, with the Git error, and the partial checkout is
   removed.
+- The commit tracks a path named `.counterpoint-tmp`: the review fails
+  before contacting Codex.
 - Policy mismatch after start or resume: fail closed, remove the checkout.
 - Reviewer cannot build (missing module offline, toolchain absent): the
   reviewer reports the limitation in its review, as the prompt asks; the
@@ -158,12 +205,21 @@ source repository is byte-identical (`git status`, refs, and `.git` mtimes),
 and a following `build: false` round resumes the same thread with the
 worktree cwd.
 
-Unit tests: scratch path derivation and symlink refusal, clone and detach
-against a test repository, cleanup on cancellation and on a failed turn,
-request hash changes with the flag, and prompt text for both modes.
+Unit tests: scratch path derivation, symlink refusal, and rejection of a
+root inside or containing the worktree or common directory; clone and detach
+against a test repository; hook and filter isolation, with a fixture whose
+global config sets `core.hooksPath` to a `post-checkout` hook and defines a
+filter named by a tracked `.gitattributes`, asserting that neither runs and
+the filtered file keeps its committed bytes; temp directory creation and a
+temporary file written through it; the tracked-file check after a turn that
+modified a file; lock contention between two processes on one workflow
+directory; cleanup on cancellation and on a failed turn; the hash unchanged
+for `build: false` against a fixture value and changed for `build: true`;
+and prompt text for both modes.
 
 Mutation checks before commit: cleanup skipped, policy check loosened, flag
-dropped from the hash.
+appended to the hash unconditionally, hooks isolation removed, overlap check
+removed.
 
 ## Live spike acceptance
 
