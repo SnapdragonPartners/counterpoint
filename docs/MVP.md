@@ -1,5 +1,28 @@
 # Counterpoint MVP
 
+## Status
+
+The MVP is complete. The acceptance scenario at the end of this document was
+demonstrated against `codex-cli 0.153.1` on 2026-09-04, and every pull request
+since that run has been reviewed through the tool itself. This document remains
+the record of the accepted MVP contract; later changes to behavior update it in
+the same change, as `CLAUDE.md` requires.
+
+Follow-up work observed during acceptance and early use is tracked in GitHub
+Issues rather than here:
+
+- [Issue 8](https://github.com/SnapdragonPartners/counterpoint/issues/8):
+  opening the review thread in the Codex app during a review causes a writer
+  conflict, and archiving it prevents `thread/resume`. Counterpoint does not
+  yet detect either condition.
+- [Issue 12](https://github.com/SnapdragonPartners/counterpoint/issues/12):
+  the read-only sandbox prevents the reviewer from building or running tests,
+  so verdicts are inspection-only. A disposable worktree as the thread working
+  directory is the candidate design.
+
+Items under "Explicitly deferred" stay deferred until an accepted design or
+issue adds them.
+
 ## Purpose
 
 Counterpoint removes the manual copy-and-paste loop between an authoring coding
@@ -261,9 +284,9 @@ interrupted it. Neither is persisted as a completed review.
 
 `review/start` is selected over a generic `turn/start` because it carries
 Codex's native review-only behavior and a dedicated review result while still
-running on the persistent thread. The live acceptance run must confirm that a
-later round can see the earlier round's review; if it cannot, the mechanism
-falls back to `turn/start` with the same compiled instructions.
+running on the persistent thread. The live acceptance run confirmed that a
+later round sees the earlier round's review, so the planned fallback to
+`turn/start` with the same compiled instructions was not needed.
 
 ### Sandbox and approvals
 

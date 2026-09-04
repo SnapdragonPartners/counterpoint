@@ -15,9 +15,10 @@ and a reviewer without becoming a general-purpose orchestrator.
 
 ## Status
 
-The MVP described in the [MVP specification](docs/MVP.md) is implemented and
-covered by automated tests against a fake app-server. Live acceptance against
-a real Codex CLI is a manual step recorded in the specification.
+The MVP described in the [MVP specification](docs/MVP.md) is complete. It is
+covered by automated tests against a fake app-server and was accepted in a
+live run against a real Codex CLI; the specification records the status and
+links the follow-up issues.
 
 ## Intended workflow
 
