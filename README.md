@@ -139,9 +139,13 @@ non-primary branch, and a locally authenticated Codex CLI.
 
 ## Operational notes
 
-- Leave the Codex review thread for a branch unarchived and closed. Opening it
-  in the Codex app while a review runs causes a writer conflict, and archiving
-  it prevents Counterpoint from resuming it.
+- Counterpoint names its threads `Counterpoint review: <repository> <branch>`
+  so they are easy to leave alone in the Codex app. Only one process can hold
+  a thread at a time. If the thread is open in the app, the next review fails
+  and says so; archive the thread in the app and retry. Counterpoint
+  unarchives it and takes it over. Do not unarchive it in the app, which would
+  open it there again. Opening the thread in the app while a review runs
+  fails on the app side.
 - The "review turn starting" log line reports `effort`, the configured
   override in force, alongside `reported_effort`, the value the app-server
   echoed back. After a resume the app-server may omit that value, so an empty

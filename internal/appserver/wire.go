@@ -21,17 +21,19 @@ type envelope struct {
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
-	Error  *rpcError       `json:"error,omitempty"`
+	Error  *ServerError    `json:"error,omitempty"`
 }
 
-// rpcError is a JSON-RPC error object.
-type rpcError struct {
+// ServerError is a JSON-RPC error object returned by the app-server, as
+// opposed to a transport, process, or policy failure. Callers that need to
+// know the server answered use errors.As.
+type ServerError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-func (e *rpcError) Error() string {
+func (e *ServerError) Error() string {
 	return fmt.Sprintf("app-server error %d: %s", e.Code, e.Message)
 }
 
@@ -42,12 +44,17 @@ const (
 
 // Method names in the v2 app-server protocol used by this package.
 const (
-	methodInitialize    = "initialize"
-	methodInitialized   = "initialized"
-	methodThreadStart   = "thread/start"
-	methodThreadResume  = "thread/resume"
-	methodReviewStart   = "review/start"
-	methodTurnInterrupt = "turn/interrupt"
+	methodInitialize   = "initialize"
+	methodInitialized  = "initialized"
+	methodThreadStart  = "thread/start"
+	methodThreadResume = "thread/resume"
+	// thread/unarchive restores an archived thread without loading it; it
+	// needs the thread's writer, so it fails while another process holds
+	// the thread. thread/name/set names a thread for the Codex UIs.
+	methodThreadUnarchive = "thread/unarchive"
+	methodThreadNameSet   = "thread/name/set"
+	methodReviewStart     = "review/start"
+	methodTurnInterrupt   = "turn/interrupt"
 
 	notifyTurnStarted       = "turn/started"
 	notifyTurnCompleted     = "turn/completed"
@@ -104,6 +111,15 @@ type threadResumeParams struct {
 	Cwd            string `json:"cwd"`
 	Sandbox        string `json:"sandbox"`
 	ApprovalPolicy string `json:"approvalPolicy"`
+}
+
+type threadUnarchiveParams struct {
+	ThreadID string `json:"threadId"`
+}
+
+type threadNameSetParams struct {
+	ThreadID string `json:"threadId"`
+	Name     string `json:"name"`
 }
 
 // initializeResponse carries the fields the schema requires; an

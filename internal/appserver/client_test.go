@@ -159,9 +159,92 @@ func TestResumeAcrossProcessRestart(t *testing.T) {
 	if err == nil || errors.Is(err, ErrProcessExited) {
 		t.Errorf("ResumeThread(unknown) error = %v, want a protocol error", err)
 	}
-	var rpcErr *rpcError
+	var rpcErr *ServerError
 	if !errors.As(err, &rpcErr) {
 		t.Errorf("ResumeThread(unknown) error = %v, want an app-server error", err)
+	}
+}
+
+func TestUnarchiveThreadMakesAnArchivedThreadResumable(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "threads")
+	cl, _ := fakeClient(t, "normal", statePath)
+	th := startThread(t, cl)
+	cl.Close()
+
+	cl2, _ := fakeClient(t, "archived", statePath)
+	_, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree")
+	var srvErr *ServerError
+	if !errors.As(err, &srvErr) {
+		t.Fatalf("ResumeThread(archived) error = %v, want a server error", err)
+	}
+	if err := cl2.UnarchiveThread(context.Background(), th.ID); err != nil {
+		t.Fatalf("UnarchiveThread: %v", err)
+	}
+	if _, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree"); err != nil {
+		t.Fatalf("ResumeThread after unarchive: %v", err)
+	}
+	// Not idempotent, as in codex-cli 0.153.1.
+	if err := cl2.UnarchiveThread(context.Background(), th.ID); !errors.As(err, &srvErr) {
+		t.Errorf("UnarchiveThread(not archived) error = %v, want a server error", err)
+	}
+	if err := cl2.UnarchiveThread(context.Background(), "thr_nope"); !errors.As(err, &srvErr) {
+		t.Errorf("UnarchiveThread(unknown) error = %v, want a server error", err)
+	}
+	events, _ := os.ReadFile(statePath + ".events")
+	if got := strings.Count(string(events), "unarchive:"+th.ID); got != 2 {
+		t.Errorf("fake recorded %d unarchive requests for %s, want 2:\n%s", got, th.ID, events)
+	}
+}
+
+func TestUnarchiveThreadFailsWhileAnotherProcessHoldsTheWriter(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "threads")
+	cl, _ := fakeClient(t, "normal", statePath)
+	th := startThread(t, cl)
+	cl.Close()
+
+	cl2, _ := fakeClient(t, "writer-held", statePath)
+	var srvErr *ServerError
+	if _, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree"); !errors.As(err, &srvErr) {
+		t.Fatalf("ResumeThread(held) error = %v, want a server error", err)
+	}
+	if err := cl2.UnarchiveThread(context.Background(), th.ID); !errors.As(err, &srvErr) {
+		t.Fatalf("UnarchiveThread(held) error = %v, want a server error", err)
+	}
+}
+
+func TestUnarchiveReturningAnotherThreadFailsClosed(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "threads")
+	cl, _ := fakeClient(t, "normal", statePath)
+	th := startThread(t, cl)
+	cl.Close()
+
+	cl2, _ := fakeClient(t, "unarchive-other-id", statePath)
+	err := cl2.UnarchiveThread(context.Background(), th.ID)
+	if !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("UnarchiveThread error = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestSetThreadName(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "threads")
+	cl, _ := fakeClient(t, "normal", statePath)
+	th := startThread(t, cl)
+	if err := cl.SetThreadName(context.Background(), th.ID, "Counterpoint review: repo feature"); err != nil {
+		t.Fatalf("SetThreadName: %v", err)
+	}
+	events, _ := os.ReadFile(statePath + ".events")
+	if !strings.Contains(string(events), "name:"+th.ID+":Counterpoint review: repo feature") {
+		t.Errorf("fake did not record the name:\n%s", events)
+	}
+	var srvErr *ServerError
+	if err := cl.SetThreadName(context.Background(), "thr_nope", "x"); !errors.As(err, &srvErr) {
+		t.Errorf("SetThreadName(unknown) error = %v, want a server error", err)
+	}
+
+	cl2, _ := fakeClient(t, "name-rejected", "")
+	th2 := startThread(t, cl2)
+	if err := cl2.SetThreadName(context.Background(), th2.ID, "x"); !errors.As(err, &srvErr) {
+		t.Errorf("SetThreadName(rejected) error = %v, want a server error", err)
 	}
 }
 
@@ -567,7 +650,7 @@ func TestPendingCallReportsTypedTransportError(t *testing.T) {
 		if !errors.Is(err, ErrWriteBacklog) {
 			t.Fatalf("pending call error = %v, want ErrWriteBacklog", err)
 		}
-		var rpcErr *rpcError
+		var rpcErr *ServerError
 		if errors.As(err, &rpcErr) {
 			t.Errorf("pending call error %v is a synthetic RPC error", err)
 		}

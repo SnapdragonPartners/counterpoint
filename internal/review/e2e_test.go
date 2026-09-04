@@ -80,6 +80,26 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 	if spawns != 2 {
 		t.Errorf("app-server spawned %d times, want 2", spawns)
 	}
+
+	// The human archived the thread in the Codex app between rounds. Round
+	// three unarchives it and continues on the same thread.
+	t.Setenv(apptest.ScenarioEnv, "archived")
+	c := repo.commit("feature-3")
+	three, err := newService().Review(context.Background(), req(c, "Round three: after archive."))
+	if err != nil {
+		t.Fatalf("round three: %v", err)
+	}
+	if three.Round != 3 || !strings.Contains(three.Review, "REVIEW for thr_1") {
+		t.Fatalf("round three did not continue on the unarchived thread: %+v", three)
+	}
+	if len(three.Warnings) != 1 || !strings.Contains(three.Warnings[0], "unarchived") {
+		t.Errorf("round three warnings = %v, want one about unarchiving", three.Warnings)
+	}
+	events, _ := os.ReadFile(fakeState + ".events")
+	wantName := "name:thr_1:Counterpoint review: " + filepath.Base(repo.dir) + " feature"
+	if got := string(events); !strings.Contains(got, "unarchive:thr_1") || !strings.Contains(got, wantName) {
+		t.Errorf("fake events lack the unarchive and name requests:\n%s", got)
+	}
 	if status := repo.git("status", "--porcelain"); status != "" {
 		t.Errorf("repository modified by reviews:\n%s", status)
 	}

@@ -36,6 +36,11 @@ type fakeReviewer struct {
 	stallSetup    bool // StartThread and ResumeThread block until ctx ends
 	omitEffort    bool // ResumeThread reports no reasoning effort, as codex-cli 0.153.1 does
 	warnings      []string
+
+	unarchived   []string
+	unarchiveErr error // nil: unarchive succeeds and the thread resumes afterwards
+	named        []string
+	nameErr      error
 }
 
 func (f *fakeReviewer) StartThread(ctx context.Context, cwd string) (appserver.Thread, error) {
@@ -65,6 +70,24 @@ func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appser
 		th.ReasoningEffort = ""
 	}
 	return th, nil
+}
+
+func (f *fakeReviewer) UnarchiveThread(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unarchived = append(f.unarchived, id)
+	if f.unarchiveErr != nil {
+		return f.unarchiveErr
+	}
+	f.resumeErr = nil
+	return nil
+}
+
+func (f *fakeReviewer) SetThreadName(_ context.Context, id, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.named = append(f.named, id+":"+name)
+	return f.nameErr
 }
 
 func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string) (*appserver.Review, error) {
@@ -268,17 +291,29 @@ func TestRewrittenHistoryIsReportedToReviewer(t *testing.T) {
 	}
 }
 
+// writerHeld is codex-cli 0.153.1's refusal when another process, such as
+// the Codex app with the thread open, holds the thread's writer. Both
+// thread/resume and thread/unarchive answer with it.
+var writerHeld = &appserver.ServerError{Code: -32600, Message: "thread thr_1 already has an active writer"}
+
 func TestResumeFailureFailsClosed(t *testing.T) {
 	h := newHarness(t)
 	first := h.repo.git("rev-parse", "HEAD")
 	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
 		t.Fatal(err)
 	}
-	h.reviewer.resumeErr = errors.New("thread not found")
+	h.reviewer.resumeErr = writerHeld
+	h.reviewer.unarchiveErr = writerHeld
 	second := h.repo.commit("feature-2")
 	_, err := h.svc.Review(context.Background(), h.request(second, "r2"))
 	if !errors.Is(err, ErrThreadUnavailable) || !strings.Contains(err.Error(), h.store.Path()) || !strings.Contains(err.Error(), "refs/heads/feature") {
 		t.Fatalf("error = %v, want ErrThreadUnavailable naming the workflow and state file", err)
+	}
+	if !strings.Contains(err.Error(), "archive it there and retry") || strings.Contains(err.Error(), "close") {
+		t.Errorf("error = %v, want the archive handoff hint and no advice to close the thread", err)
+	}
+	if len(h.reviewer.unarchived) != 1 {
+		t.Errorf("unarchive attempts = %v, want exactly one", h.reviewer.unarchived)
 	}
 	if len(h.reviewer.started) != 1 {
 		t.Errorf("a replacement thread was started: %v", h.reviewer.started)
@@ -287,6 +322,97 @@ func TestResumeFailureFailsClosed(t *testing.T) {
 	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
 	if wf, _ := st.Get(gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")); wf.Round != 1 || wf.LastCommit != first {
 		t.Errorf("state changed by a failed round: %+v", wf)
+	}
+}
+
+func TestArchivedThreadIsUnarchivedAndResumed(t *testing.T) {
+	h := newHarness(t)
+	first := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	h.reviewer.resumeErr = &appserver.ServerError{Code: -32600, Message: "session thr_1 is archived. Run `codex unarchive thr_1` to unarchive it first."}
+	second := h.repo.commit("feature-2")
+	res, err := h.svc.Review(context.Background(), h.request(second, "r2"))
+	if err != nil {
+		t.Fatalf("round two after archive: %v", err)
+	}
+	if res.Round != 2 || !strings.Contains(res.Review, "thr_1") {
+		t.Fatalf("result = %+v, want round 2 on the stored thread", res)
+	}
+	if got := h.reviewer.unarchived; len(got) != 1 || got[0] != "thr_1" {
+		t.Errorf("unarchived = %v, want [thr_1]", got)
+	}
+	if len(h.reviewer.resumed) != 1 || len(h.reviewer.started) != 1 {
+		t.Errorf("resumed %v started %v; want one successful resume and no replacement thread", h.reviewer.resumed, h.reviewer.started)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "unarchived") {
+		t.Errorf("warnings = %v, want one saying the thread was unarchived", res.Warnings)
+	}
+	st, _ := h.store.Load()
+	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
+	wf, _ := st.Get(gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature"))
+	if wf.Round != 2 || len(wf.LastWarnings) != 1 {
+		t.Errorf("persisted workflow = %+v, want round 2 with the warning", wf)
+	}
+}
+
+func TestTransportResumeFailureSkipsUnarchive(t *testing.T) {
+	h := newHarness(t)
+	first := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	// The server never answered, so nothing says the thread is archived
+	// and an unarchive attempt would be a guess against a dead process.
+	h.reviewer.resumeErr = fmt.Errorf("thread/resume: %w", appserver.ErrProcessExited)
+	second := h.repo.commit("feature-2")
+	_, err := h.svc.Review(context.Background(), h.request(second, "r2"))
+	if !errors.Is(err, ErrThreadUnavailable) {
+		t.Fatalf("error = %v, want ErrThreadUnavailable", err)
+	}
+	if len(h.reviewer.unarchived) != 0 {
+		t.Errorf("unarchive attempted after a transport failure: %v", h.reviewer.unarchived)
+	}
+}
+
+func TestNewThreadIsNamedForTheWorkflow(t *testing.T) {
+	h := newHarness(t)
+	first := h.repo.git("rev-parse", "HEAD")
+	res, err := h.svc.Review(context.Background(), h.request(first, "r1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "thr_1:Counterpoint review: " + filepath.Base(h.repo.dir) + " feature"
+	if got := h.reviewer.named; len(got) != 1 || got[0] != want {
+		t.Errorf("named = %v, want [%s]", got, want)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none", res.Warnings)
+	}
+
+	// Naming is cosmetic: a refusal is reported, not fatal, and a resumed
+	// thread is not renamed.
+	h.reviewer.nameErr = &appserver.ServerError{Code: -32600, Message: "thread names are disabled"}
+	second := h.repo.commit("feature-2")
+	res, err = h.svc.Review(context.Background(), h.request(second, "r2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.reviewer.named) != 1 {
+		t.Errorf("resumed thread was renamed: %v", h.reviewer.named)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none on a resumed round", res.Warnings)
+	}
+	h2 := newHarness(t)
+	h2.reviewer.nameErr = h.reviewer.nameErr
+	res, err = h2.svc.Review(context.Background(), h2.request(h2.repo.git("rev-parse", "HEAD"), "r1"))
+	if err != nil {
+		t.Fatalf("review with a refused name: %v", err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "could not be named") {
+		t.Errorf("warnings = %v, want one about the name", res.Warnings)
 	}
 }
 

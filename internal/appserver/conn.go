@@ -417,7 +417,7 @@ func (c *conn) handleServerRequest(env *envelope) {
 		result = map[string]any{"answers": map[string]any{}}
 	default:
 		c.addWarning(fmt.Sprintf("rejected unsupported app-server request %s%s", env.Method, identifiers(p)))
-		c.sendFromReader(map[string]any{"id": env.ID, "error": &rpcError{Code: codeMethodNotFound, Message: "unsupported request: " + env.Method}})
+		c.sendFromReader(map[string]any{"id": env.ID, "error": &ServerError{Code: codeMethodNotFound, Message: "unsupported request: " + env.Method}})
 		return
 	}
 	c.addWarning(fmt.Sprintf("declined app-server request %s%s", env.Method, identifiers(p)))
