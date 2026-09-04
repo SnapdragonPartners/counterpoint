@@ -173,6 +173,61 @@ func TestUnsupportedVersionIsRejectedAndPreserved(t *testing.T) {
 	}
 }
 
+func TestOversizedStateIsRejectedAndPreserved(t *testing.T) {
+	st := tempStore(t)
+	if err := os.MkdirAll(filepath.Dir(st.Path()), dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	// A sparse file reports a huge size without consuming disk.
+	f, err := os.OpenFile(st.Path(), os.O_CREATE|os.O_WRONLY, filePerm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"version": 1, "workflows": {}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxStateFileSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = st.Load()
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Load error = %v, want ErrTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), st.Path()) {
+		t.Errorf("error %q should name the file", err)
+	}
+	if err := st.Save(&State{}); !errors.Is(err, ErrNotLoaded) {
+		t.Fatalf("Save error = %v, want ErrNotLoaded", err)
+	}
+	info, err := os.Stat(st.Path())
+	if err != nil || info.Size() != MaxStateFileSize+1 {
+		t.Errorf("oversized file changed: size %d, %v", info.Size(), err)
+	}
+}
+
+func TestExactlyMaxSizeIsAccepted(t *testing.T) {
+	st := tempStore(t)
+	if err := os.MkdirAll(filepath.Dir(st.Path()), dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	// Valid JSON padded with trailing whitespace to exactly the limit.
+	body := `{"version": 1, "workflows": {}}`
+	data := append([]byte(body), make([]byte, MaxStateFileSize-len(body))...)
+	for i := len(body); i < len(data); i++ {
+		data[i] = ' '
+	}
+	if err := os.WriteFile(st.Path(), data, filePerm); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Load(); err != nil {
+		t.Fatalf("Load at exactly the limit: %v", err)
+	}
+}
+
 func TestSaveWithoutLoadIsRefused(t *testing.T) {
 	st := tempStore(t)
 	if err := st.Save(&State{}); !errors.Is(err, ErrNotLoaded) {

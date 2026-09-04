@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -30,10 +31,16 @@ type Lock struct {
 }
 
 // AcquireLock takes an exclusive advisory lock on path, creating the file
-// if needed. It retries until the lock is obtained, wait elapses, or ctx is
-// done. The lock is per open file description, so it also excludes other
-// goroutines in the same process that call AcquireLock.
+// and its parent directory (mode 0700) if needed, since on a fresh
+// installation the state directory does not exist until the first review.
+// It retries until the lock is obtained, wait elapses, or ctx is done. The
+// lock is per open file description, so it also excludes other goroutines in
+// the same process that call AcquireLock.
 func AcquireLock(ctx context.Context, path string, wait time.Duration) (*Lock, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
+		return nil, fmt.Errorf("create lock dir %s: %w", dir, err)
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, filePerm) //nolint:gosec // lock file beside the state file, not user input
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)

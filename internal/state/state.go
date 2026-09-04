@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -31,11 +32,18 @@ const (
 
 	dirPerm  = 0o700
 	filePerm = 0o600
+
+	// MaxStateFileSize bounds how much of the state file Load will read.
+	// The file is untrusted input; a corrupt or hostile file must not be
+	// able to exhaust memory before JSON validation. Reviews are text, so
+	// this leaves ample room for many workflows.
+	MaxStateFileSize = 16 << 20
 )
 
 // Sentinel errors. Wrapped errors name the file; match with errors.Is.
 var (
 	ErrMalformed          = errors.New("state file is malformed")
+	ErrTooLarge           = errors.New("state file exceeds the size limit")
 	ErrUnsupportedVersion = errors.New("state file version is not supported")
 	ErrNotLoaded          = errors.New("state must be loaded before it is saved")
 )
@@ -130,7 +138,7 @@ func (st *Store) LockPath() string {
 // names the file, and the store refuses to save until a later Load succeeds.
 func (st *Store) Load() (*State, error) {
 	st.loaded = false
-	data, err := os.ReadFile(st.path)
+	data, err := readBounded(st.path, MaxStateFileSize)
 	if errors.Is(err, os.ErrNotExist) {
 		st.loaded = true
 		return &State{Workflows: map[string]Workflow{}}, nil
@@ -177,6 +185,27 @@ func (st *Store) Save(s *State) error {
 		return fmt.Errorf("write state %s: %w", st.path, err)
 	}
 	return nil
+}
+
+// readBounded reads path, returning ErrTooLarge if it holds more than
+// limit bytes. It reads at most limit+1 bytes regardless of the file's
+// reported size, so a sparse or growing file cannot force a large
+// allocation.
+func readBounded(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // state file path is configured, not user input
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w: more than %d bytes", ErrTooLarge, limit)
+	}
+	return data, nil
 }
 
 // writeAtomic writes data to a temporary file in dir, syncs it, renames it

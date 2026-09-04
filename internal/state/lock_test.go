@@ -168,9 +168,33 @@ func TestAcquireLockHonorsContext(t *testing.T) {
 	}
 }
 
-func TestAcquireLockRejectsUnwritablePath(t *testing.T) {
-	_, err := AcquireLock(context.Background(), filepath.Join(t.TempDir(), "missing", "x.lock"), time.Second)
+func TestAcquireLockCreatesParentDirectory(t *testing.T) {
+	// A fresh installation has no state directory yet; the first review
+	// must be able to take the lock.
+	path := filepath.Join(t.TempDir(), "fresh", "nested", "state.json.lock")
+	l, err := AcquireLock(context.Background(), path, time.Second)
+	if err != nil {
+		t.Fatalf("AcquireLock on a fresh nested path: %v", err)
+	}
+	defer func() { _ = l.Release() }()
+
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("parent directory not created: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != dirPerm {
+		t.Errorf("parent directory mode = %o, want %o", perm, dirPerm)
+	}
+}
+
+func TestAcquireLockRejectsUnusablePath(t *testing.T) {
+	// The parent is a regular file, so the directory cannot be created.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, nil, filePerm); err != nil {
+		t.Fatal(err)
+	}
+	_, err := AcquireLock(context.Background(), filepath.Join(blocker, "x.lock"), time.Second)
 	if err == nil {
-		t.Fatal("AcquireLock in a missing directory: want error")
+		t.Fatal("AcquireLock under a regular file: want error")
 	}
 }
