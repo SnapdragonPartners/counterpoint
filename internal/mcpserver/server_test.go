@@ -33,6 +33,12 @@ func (stubReviewer) ResumeThread(_ context.Context, id, _ string) (appserver.Thr
 	return appserver.Thread{ID: id}, nil
 }
 
+func (stubReviewer) UnarchiveThread(context.Context, string) error { return nil }
+
+func (stubReviewer) SetThreadName(context.Context, string, string) error { return nil }
+
+func (stubReviewer) AddWarning(string) {}
+
 func (stubReviewer) Review(_ context.Context, _, instructions string) (*appserver.Review, error) {
 	first, _, _ := strings.Cut(instructions, "\n")
 	return &appserver.Review{TurnID: "t", Text: "APPROVED: " + first}, nil
@@ -154,6 +160,12 @@ func (b *blockingReviewer) StartThread(context.Context, string) (appserver.Threa
 func (b *blockingReviewer) ResumeThread(_ context.Context, id, _ string) (appserver.Thread, error) {
 	return appserver.Thread{ID: id}, nil
 }
+
+func (b *blockingReviewer) UnarchiveThread(context.Context, string) error { return nil }
+
+func (b *blockingReviewer) SetThreadName(context.Context, string, string) error { return nil }
+
+func (b *blockingReviewer) AddWarning(string) {}
 
 func (b *blockingReviewer) Review(ctx context.Context, _, _ string) (*appserver.Review, error) {
 	close(b.started)

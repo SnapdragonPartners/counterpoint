@@ -12,9 +12,9 @@ Follow-up work observed during acceptance and early use is tracked in GitHub
 Issues rather than here:
 
 - [Issue 8](https://github.com/SnapdragonPartners/counterpoint/issues/8):
-  opening the review thread in the Codex app during a review causes a writer
-  conflict, and archiving it prevents `thread/resume`. Counterpoint does not
-  yet detect either condition.
+  a thread open in the Codex app cannot be resumed, and an archived thread
+  could not be either. Resolved by the archive handoff described under
+  "Recovery".
 - [Issue 12](https://github.com/SnapdragonPartners/counterpoint/issues/12):
   the read-only sandbox prevents the reviewer from building or running tests,
   so verdicts are inspection-only. A disposable worktree as the thread working
@@ -269,6 +269,11 @@ The implemented subset, using the v2 method names, is:
 - `thread/start` for a new workflow and `thread/resume` for an existing one,
   both configured with the read-only sandbox mode, the `never` approval policy,
   and the worktree path;
+- `thread/name/set` after `thread/start`, naming the thread
+  `Counterpoint review: <repository> <branch>` for the Codex UIs; a refusal
+  is reported as a warning, not a failure;
+- `thread/unarchive` once, when `thread/resume` is refused, followed by one
+  more `thread/resume`; see "Recovery";
 - `review/start` with `delivery: "inline"` and a `custom` target carrying the
   compiled review instructions, so the review runs on the persistent thread;
 - `item/completed` for the `exitedReviewMode` item, whose `review` field is the
@@ -416,11 +421,30 @@ the primary control.
 
 ## Recovery
 
-If `thread/resume` fails for a stored thread ID, Counterpoint fails closed. It
-does not start a replacement thread, because silently discarding retained review
-context would defeat the product. The error names the workflow key and the state
-file so a human can clear the entry deliberately. An explicit reset operation is
-deferred until real recovery cases are understood.
+Codex allows one writer per thread. The Codex app holds the writer while a
+thread is open there, and it offers no way to close a thread, only to archive
+or delete it. Archiving releases the writer. Counterpoint therefore treats an
+archived thread as the human's handoff: when the app-server refuses
+`thread/resume`, Counterpoint calls `thread/unarchive` once and, if that
+succeeds, resumes again. Unarchiving is not idempotent and itself needs the
+writer, so it fails for a thread that is not archived or that another process
+holds, and the original refusal stands. The retry does not inspect error text.
+A refusal that is a transport or process failure rather than an app-server
+answer gets no unarchive attempt, and neither does a review whose context has
+already ended, so an aborted call never changes the thread's archival state.
+A successful unarchive is reported in the response `warnings` and persisted
+with the round. Warnings raised by Counterpoint itself, including this one
+and a refused thread name, are fixed strings that share the app-server
+warning bounds; they never carry model or server output.
+
+If the thread still cannot be resumed, Counterpoint fails closed. It does not
+start a replacement thread, because silently discarding retained review
+context would defeat the product. The error names the workflow key and the
+state file, and tells the human to archive the thread in Codex and retry, or
+to remove the workflow from the state file if the thread no longer exists.
+Unarchiving in the app is the wrong move: it reopens the thread there and
+holds the writer again. An explicit reset operation is deferred until real
+recovery cases are understood.
 
 ## Minimum observability
 
@@ -450,6 +474,9 @@ Unit tests cover:
 - rejection of malformed commits and of commits that are not the branch tip or
   the worktree `HEAD`;
 - rejection of a dirty worktree, including untracked files;
+- unarchive-and-retry when `thread/resume` is refused, no unarchive attempt
+  after a transport failure, and fail-closed when both are refused;
+- naming a new thread, with a refused name reported as a warning;
 - merge-base resolution against local and remote-tracking primary branches;
 - rewritten-history detection when the previous tip is no longer an ancestor;
 - stable workflow-key construction across worktrees;

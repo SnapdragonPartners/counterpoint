@@ -70,6 +70,11 @@ type threadResumeParams struct {
 	ApprovalPolicy string `json:"approvalPolicy"`
 }
 
+type threadIDParams struct {
+	ThreadID string `json:"threadId"`
+	Name     string `json:"name"`
+}
+
 type reviewStartParams struct {
 	ThreadID string `json:"threadId"`
 	Target   struct {
@@ -93,6 +98,7 @@ type fakeServer struct {
 	mu          sync.Mutex
 	initialized bool
 	threads     map[string]bool
+	archived    map[string]bool // archived scenario: stored threads start archived
 	nextThread  int
 	nextTurn    int
 	nextSrvID   int
@@ -109,10 +115,18 @@ func Run(scenario, statePath string) int {
 		statePath:  statePath,
 		out:        bufio.NewWriter(os.Stdout),
 		threads:    map[string]bool{},
+		archived:   map[string]bool{},
 		srvPending: map[string]chan envelope{},
 		interrupts: map[string]chan struct{}{},
 	}
 	f.loadThreads()
+	if scenario == "archived" || scenario == "unarchive-other-id" {
+		// Every thread persisted by an earlier run was archived meanwhile,
+		// as when the user archived it in the Codex app.
+		for id := range f.threads {
+			f.archived[id] = true
+		}
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxMessageSize)
@@ -236,6 +250,10 @@ func (f *fakeServer) handle(env *envelope) {
 		f.handleThreadStart(env)
 	case "thread/resume":
 		f.handleThreadResume(env)
+	case "thread/unarchive":
+		f.handleThreadUnarchive(env)
+	case "thread/name/set":
+		f.handleThreadNameSet(env)
 	case "review/start":
 		f.handleReviewStart(env)
 	case "test/ping":
@@ -353,9 +371,20 @@ func (f *fakeServer) handleThreadResume(env *envelope) {
 	}
 	f.mu.Lock()
 	known := f.threads[p.ThreadID]
+	archived := f.archived[p.ThreadID]
 	f.mu.Unlock()
 	if !known {
 		f.fail(env.ID, -32602, "thread not found: "+p.ThreadID)
+		return
+	}
+	// Messages below are codex-cli 0.153.1's, which the client must not
+	// depend on: the recovery path is driven by thread/unarchive's answer.
+	if f.scenario == "writer-held" {
+		f.fail(env.ID, -32600, "thread "+p.ThreadID+" already has an active writer")
+		return
+	}
+	if archived {
+		f.fail(env.ID, -32600, "session "+p.ThreadID+" is archived. Run `codex unarchive "+p.ThreadID+"` to unarchive it first.")
 		return
 	}
 	returned := p.ThreadID
@@ -363,6 +392,61 @@ func (f *fakeServer) handleThreadResume(env *envelope) {
 		returned = "thr_impostor"
 	}
 	f.respond(env.ID, f.threadResult(returned, p.Cwd))
+}
+
+// handleThreadUnarchive mirrors codex-cli 0.153.1: unarchive needs the
+// thread's writer and is not idempotent, so it fails for a thread another
+// process holds and for a thread that is not archived.
+func (f *fakeServer) handleThreadUnarchive(env *envelope) {
+	if !f.requireInit(env.ID) {
+		return
+	}
+	var p threadIDParams
+	if json.Unmarshal(env.Params, &p) != nil || p.ThreadID == "" {
+		f.fail(env.ID, -32602, "thread/unarchive requires threadId")
+		return
+	}
+	f.recordEvent("unarchive:" + p.ThreadID)
+	if f.scenario == "writer-held" {
+		f.fail(env.ID, -32600, "thread "+p.ThreadID+" already has an active writer")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.threads[p.ThreadID] || !f.archived[p.ThreadID] {
+		f.fail(env.ID, -32600, "no archived rollout found for thread id "+p.ThreadID)
+		return
+	}
+	delete(f.archived, p.ThreadID)
+	returned := p.ThreadID
+	if f.scenario == "unarchive-other-id" {
+		returned = "thr_impostor"
+	}
+	f.respond(env.ID, map[string]any{"thread": map[string]any{"id": returned, "status": map[string]any{"type": "notLoaded"}}})
+}
+
+func (f *fakeServer) handleThreadNameSet(env *envelope) {
+	if !f.requireInit(env.ID) {
+		return
+	}
+	var p threadIDParams
+	if json.Unmarshal(env.Params, &p) != nil || p.ThreadID == "" || p.Name == "" {
+		f.fail(env.ID, -32602, "thread/name/set requires threadId and name")
+		return
+	}
+	f.mu.Lock()
+	known := f.threads[p.ThreadID]
+	f.mu.Unlock()
+	if !known {
+		f.fail(env.ID, -32602, "thread not found: "+p.ThreadID)
+		return
+	}
+	if f.scenario == "name-rejected" {
+		f.fail(env.ID, -32600, "thread names are disabled")
+		return
+	}
+	f.recordEvent("name:" + p.ThreadID + ":" + p.Name)
+	f.respond(env.ID, map[string]any{})
 }
 
 func (f *fakeServer) handleReviewStart(env *envelope) {

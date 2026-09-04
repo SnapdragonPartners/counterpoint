@@ -97,7 +97,8 @@ handoff is normally a tool call, not a message to DR:
   each round's notes so a reviewer that lost context can still verify. A new
   or renamed branch starts a new thread with no memory of earlier ones. If the
   tool reports the thread is unavailable, stop and tell DR rather than working
-  around it.
+  around it; the error says what DR can do (usually archive the thread in the
+  Codex app so the next call can unarchive and take it over).
 - Treat the tool result as Codex's review: address every blocking finding as
   described in the workflow above, and quote the approval or the findings to
   DR when stopping at the push gate. The reviewer runs in a read-only sandbox

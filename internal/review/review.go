@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/SnapdragonPartners/counterpoint/internal/appserver"
@@ -46,6 +48,14 @@ var (
 	ErrSetupTimeout      = errors.New("app-server setup timed out")
 )
 
+// threadRecoveryHint tells the human what to do when the stored thread
+// cannot be resumed. Archiving is the handoff: the Codex app has no way to
+// close a thread, only to archive or delete it, and archiving releases the
+// thread's writer so the next review can unarchive it and take it over.
+// Unarchiving in the app would reopen it there and hold the writer again.
+const threadRecoveryHint = "if the thread is open in another Codex process, such as the Codex app, archive it there and retry " +
+	"so Counterpoint can unarchive and take it over; if the thread no longer exists, remove the workflow from the state file"
+
 // requestIDKey carries the request correlation id in a context.
 type requestIDKey struct{}
 
@@ -69,6 +79,11 @@ func RequestIDFrom(ctx context.Context) string {
 type Reviewer interface {
 	StartThread(ctx context.Context, cwd string) (appserver.Thread, error)
 	ResumeThread(ctx context.Context, threadID, cwd string) (appserver.Thread, error)
+	UnarchiveThread(ctx context.Context, threadID string) error
+	SetThreadName(ctx context.Context, threadID, name string) error
+	// AddWarning queues a bridge-level warning for the next Review result
+	// under the same bounds as the reviewer's own warnings.
+	AddWarning(w string)
 	Review(ctx context.Context, threadID, instructions string) (*appserver.Review, error)
 	Close()
 }
@@ -252,6 +267,26 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	var thread appserver.Thread
 	if known {
 		thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
+		var refused *appserver.ServerError
+		// The setup context is checked before each recovery call: an
+		// aborted review must not go on to change the thread's archival
+		// state, and a call on an ended context could still be sent.
+		if errors.As(err, &refused) && setupCtx.Err() == nil {
+			// The app-server refused the resume. An archived thread is the
+			// human's handoff (issue #8): archiving in the Codex app
+			// releases the thread's writer, and unarchiving from here takes
+			// the thread over without reopening it in the app. The attempt
+			// does not depend on why the resume failed, because unarchive
+			// itself fails for a thread that is not archived or whose
+			// writer another process holds; then the resume failure stands.
+			if uerr := reviewer.UnarchiveThread(setupCtx, wf.ThreadID); uerr != nil {
+				s.log.Info("stored thread was not unarchived", "request", requestID, "workflow", key, "thread", abbreviate(wf.ThreadID), "error", uerr)
+			} else if setupCtx.Err() == nil {
+				s.log.Info("stored thread unarchived", "request", requestID, "workflow", key, "thread", abbreviate(wf.ThreadID))
+				reviewer.AddWarning("the stored Codex thread was archived; Counterpoint unarchived it and resumed the review there")
+				thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
+			}
+		}
 		if err != nil {
 			// Cancellation and the setup deadline are transient and must
 			// not suggest clearing the stored association. Any other resume
@@ -260,12 +295,23 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 			if setupCtx.Err() != nil {
 				return nil, setupError(setupCtx, err)
 			}
-			return nil, fmt.Errorf("%w: workflow %s in %s: %w", ErrThreadUnavailable, key, s.store.Path(), err)
+			return nil, fmt.Errorf("%w: workflow %s in %s: %w; %s", ErrThreadUnavailable, key, s.store.Path(), err, threadRecoveryHint)
 		}
 	} else {
 		thread, err = reviewer.StartThread(setupCtx, repo.Worktree)
 		if err != nil {
 			return nil, setupError(setupCtx, err)
+		}
+		// The name marks the thread in the Codex UIs as Counterpoint's so
+		// it is left alone. It is not required for the review. The server's
+		// message goes to the log only; the warning is a fixed string so
+		// untrusted output cannot fill the warning budget.
+		if nerr := reviewer.SetThreadName(setupCtx, thread.ID, threadName(repo.Worktree, branch.Ref)); nerr != nil {
+			if setupCtx.Err() != nil {
+				return nil, setupError(setupCtx, nerr)
+			}
+			s.log.Warn("thread not named", "request", requestID, "workflow", key, "thread", abbreviate(thread.ID), "error", nerr)
+			reviewer.AddWarning("the new Codex thread could not be named; see the Counterpoint log")
 		}
 	}
 	cancelSetup()
@@ -331,13 +377,25 @@ func incompleteWorkflowField(wf state.Workflow) string {
 	return ""
 }
 
-// setupError attributes a setup failure to the setup deadline when that is
-// what ended it.
+// setupError attributes a setup failure to whatever ended the setup
+// context, when it ended: the setup deadline or the caller's cancellation.
+// A call can return its own error, such as a server refusal, in the same
+// instant the context ends; the outcome is still the abort.
 func setupError(setupCtx context.Context, err error) error {
-	if errors.Is(context.Cause(setupCtx), ErrSetupTimeout) {
+	cause := context.Cause(setupCtx)
+	switch {
+	case cause == nil || errors.Is(err, cause):
+		return err
+	case errors.Is(cause, ErrSetupTimeout):
 		return fmt.Errorf("%w: %w", ErrSetupTimeout, err)
+	default:
+		return fmt.Errorf("%w: %w", cause, err)
 	}
-	return err
+}
+
+// threadName is the Codex UI name for a workflow's thread.
+func threadName(worktree, branchRef string) string {
+	return fmt.Sprintf("Counterpoint review: %s %s", filepath.Base(worktree), strings.TrimPrefix(branchRef, "refs/heads/"))
 }
 
 // abbreviate shortens an identifier for logs.

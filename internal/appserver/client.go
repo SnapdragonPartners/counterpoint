@@ -155,6 +155,38 @@ func (cl *Client) ResumeThread(ctx context.Context, threadID, cwd string) (Threa
 	return threadFromResponse(resp, cwd)
 }
 
+// UnarchiveThread restores an archived thread so it can be resumed. The
+// app-server rejects the call for a thread that is not archived and for a
+// thread whose writer another process holds, so a success means the thread
+// was archived and is now free to resume.
+func (cl *Client) UnarchiveThread(ctx context.Context, threadID string) error {
+	var resp struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if err := cl.c.call(ctx, methodThreadUnarchive, threadUnarchiveParams{ThreadID: threadID}, &resp); err != nil {
+		return err
+	}
+	if resp.Thread.ID != threadID {
+		return fmt.Errorf("%w: unarchive returned thread %q, requested %q", ErrIncompatible, resp.Thread.ID, threadID)
+	}
+	return nil
+}
+
+// SetThreadName names a thread in the Codex UIs.
+func (cl *Client) SetThreadName(ctx context.Context, threadID, name string) error {
+	return cl.c.call(ctx, methodThreadNameSet, threadNameSetParams{ThreadID: threadID, Name: name}, nil)
+}
+
+// AddWarning records a bridge-level warning for the next Review result.
+// It shares the bounds and the omitted-count marker of the warnings the
+// client raises itself, so callers cannot grow the list past the contract.
+func (cl *Client) AddWarning(w string) {
+	cl.log.Warn(w)
+	cl.c.recordWarning(w)
+}
+
 // threadFromResponse validates what the server reports back and fails
 // closed unless the effective policy is the read-only sandbox without
 // network access with the never approval policy, and the effective working

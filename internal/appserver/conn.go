@@ -417,7 +417,7 @@ func (c *conn) handleServerRequest(env *envelope) {
 		result = map[string]any{"answers": map[string]any{}}
 	default:
 		c.addWarning(fmt.Sprintf("rejected unsupported app-server request %s%s", env.Method, identifiers(p)))
-		c.sendFromReader(map[string]any{"id": env.ID, "error": &rpcError{Code: codeMethodNotFound, Message: "unsupported request: " + env.Method}})
+		c.sendFromReader(map[string]any{"id": env.ID, "error": &ServerError{Code: codeMethodNotFound, Message: "unsupported request: " + env.Method}})
 		return
 	}
 	c.addWarning(fmt.Sprintf("declined app-server request %s%s", env.Method, identifiers(p)))
@@ -452,6 +452,11 @@ func truncateIdentifier(id string) string {
 // way, since logs are bounded by the operator, not by this process.
 func (c *conn) addWarning(w string) {
 	c.log.Warn("app-server: " + w)
+	c.recordWarning(w)
+}
+
+// recordWarning applies the warning bounds without logging.
+func (c *conn) recordWarning(w string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.warnings) >= maxWarnings || c.warningBytes+len(w) > maxWarningBytes {
