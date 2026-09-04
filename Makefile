@@ -15,15 +15,12 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/counterpoint ./cmd/counterpoint
 
 # The installed binary is the stable tool MCP clients run; bin/counterpoint is
-# the build under test. Installing promotes deliberately. GOBIN when set,
-# otherwise the first GOPATH entry's bin, which is where go install puts
-# binaries and the conventional PATH entry for Go tools. GOPATH may be a
-# colon-separated list; this Makefile already assumes a POSIX shell.
-INSTALL_DIR ?= $(or $(shell go env GOBIN),$(shell go env GOPATH | cut -d: -f1)/bin)
-
+# the build under test. Installing promotes deliberately. go install chooses
+# the destination: GOBIN when set, otherwise the first GOPATH entry's bin, the
+# conventional PATH entry for Go tools. go list reports that same path.
 install:
-	go build -ldflags "$(LDFLAGS)" -o "$(INSTALL_DIR)/counterpoint" ./cmd/counterpoint
-	@echo "Installed $(VERSION) to $(INSTALL_DIR)/counterpoint"
+	go install -ldflags "$(LDFLAGS)" ./cmd/counterpoint
+	@echo "Installed $(VERSION) to $$(go list -f '{{.Target}}' ./cmd/counterpoint)"
 
 test:
 	go test -race -cover ./...
