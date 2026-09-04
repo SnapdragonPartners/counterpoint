@@ -41,3 +41,27 @@ func TestRequestHashLengthPrefixPreventsFieldShifting(t *testing.T) {
 		t.Error("field boundary shift produced an identical hash")
 	}
 }
+
+// TestRequestHashKeepsLegacyEncodingForReadOnly pins the hash of a request
+// without the build flag to the value the pre-flag code produced, so state
+// written before the flag existed still replays identical read-only
+// requests instead of starting a paid turn.
+func TestRequestHashKeepsLegacyEncodingForReadOnly(t *testing.T) {
+	base := Request{Identity: "id", BranchRef: "refs/heads/f", Commit: "c", Base: "b", BranchNotes: "notes"}
+	const legacy = "0169522937f4f325152809af94d63fb745260c7ccef363a211c2df410c372419"
+	if got := base.Hash(); got != legacy {
+		t.Fatalf("Hash() = %s, want the pre-flag value %s", got, legacy)
+	}
+	build := base
+	build.Build = true
+	if build.Hash() == legacy {
+		t.Fatal("a build-capable request hashes like the read-only one")
+	}
+	// The marker is length-prefixed like every field, so notes ending in
+	// the marker text do not collide with a build request.
+	tricky := base
+	tricky.BranchNotes += "build"
+	if tricky.Hash() == build.Hash() {
+		t.Fatal("notes ending in the marker collide with the build flag")
+	}
+}

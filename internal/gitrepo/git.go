@@ -119,9 +119,16 @@ func runWithLimit(ctx context.Context, dir string, stdoutLimit int, args ...stri
 // command. A failure caused by context cancellation wraps the context error
 // so callers can match it with errors.Is.
 func runBounded(ctx context.Context, dir string, stdoutLimit int, args ...string) (out string, truncated bool, err error) {
+	return runBoundedEnv(ctx, dir, stdoutLimit, nil, args...)
+}
+
+// runBoundedEnv is runBounded with extra environment entries appended after
+// the cleaned environment, so they take effect on platforms that honor the
+// last definition of a key.
+func runBoundedEnv(ctx context.Context, dir string, stdoutLimit int, extraEnv []string, args ...string) (out string, truncated bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // argument array; inputs never reach a shell
 	cmd.Dir = dir
-	cmd.Env = cleanEnv(cmd.Environ())
+	cmd.Env = append(cleanEnv(cmd.Environ()), extraEnv...)
 
 	stdout := &boundedBuffer{limit: stdoutLimit}
 	stderr := &boundedBuffer{limit: maxStderr}

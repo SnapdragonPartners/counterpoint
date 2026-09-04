@@ -16,9 +16,12 @@ Issues rather than here:
   could not be either. Resolved by the archive handoff described under
   "Recovery".
 - [Issue 12](https://github.com/SnapdragonPartners/counterpoint/issues/12):
-  the read-only sandbox prevents the reviewer from building or running tests,
-  so verdicts are inspection-only. A disposable worktree as the thread working
-  directory is the candidate design.
+  the read-only sandbox prevented the reviewer from building or running
+  tests. Resolved by the optional build-capable review in a disposable
+  checkout, described under "Review target" and "Sandbox and approvals" and
+  designed in `docs/design/disposable-checkout.md`. Retention of its build
+  cache is
+  [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
 
 Items under "Explicitly deferred" stay deferred until an accepted design or
 issue adds them.
@@ -94,7 +97,8 @@ Input:
   "repo": "/absolute/path/to/repository",
   "branch": "v2/phase_3/prompt-packs",
   "commit": "404b3a2",
-  "branch_notes": "This commit carries ..."
+  "branch_notes": "This commit carries ...",
+  "build": false
 }
 ```
 
@@ -110,6 +114,12 @@ Fields:
 - `branch_notes` is non-empty author-produced handoff text of at most 1 MiB.
   Counterpoint does not attempt to derive or rewrite it; longer notes are
   rejected before any work starts.
+- `build` is optional and defaults to false. When true, the reviewer works in
+  a disposable checkout of the commit where it may build and run tests; see
+  "Review target". It costs wall-clock time, one cold build per branch and a
+  test run per round, so the author asks for it when the change warrants
+  that evidence. The flag is part of the request identity: the same commit
+  and notes in the other mode is a new round, not a replay.
 
 Successful output:
 
@@ -165,6 +175,45 @@ rewritten; Counterpoint says so and Codex performs a complete review.
 Requiring a clean worktree at the tip means the files Codex reads on disk are
 exactly the files in the reviewed commit. The prompt still directs Codex to use
 Git for history and diffs rather than relying on working-tree state alone.
+
+### Build-capable reviews
+
+With `build: true`, after validation and inside the review lock, Counterpoint
+prepares a disposable checkout and makes it the thread's working directory
+instead of the user's worktree:
+
+1. The scratch root is `os.UserCacheDir()/counterpoint/checkouts`, or
+   `COUNTERPOINT_CHECKOUT_DIR` when set. It is canonicalized before anything
+   is created, and the review fails if it lies inside the repository's
+   worktree or common Git directory or contains either, so scratch and cache
+   can never land inside the reviewed repository.
+2. One directory per workflow key holds `checkout/`, recreated every round;
+   `cache/`, kept between rounds; and its own advisory lock, held from before
+   the checkout is replaced until after it is removed. The lock is keyed to
+   the directory rather than to the state file, because two installations
+   with different state files could share the default root.
+3. The checkout is a shared, no-checkout clone of the repository's common
+   directory with the commit checked out detached, populated with the user's
+   global and system Git configuration ignored, no templates, and hooks
+   pointed at an empty directory. That keeps a global hooks path, a
+   post-checkout hook, or a filter such as Git LFS named by a tracked
+   `.gitattributes` from running before the sandbox exists. The clone reads
+   objects through an alternates link to the source object store and writes
+   nothing into the source repository. A leftover checkout from a crashed
+   round is replaced.
+4. `checkout/.counterpoint-tmp` is created for the reviewer's `TMPDIR`. A
+   commit that tracks that name is refused.
+5. After the turn, tracked files in the checkout are compared with the
+   commit. Any change, whether a lockfile rewrite or an edit despite
+   instructions, is reported in the response `warnings` because the
+   reviewer's results may then not describe the commit. Untracked build
+   output is expected.
+6. On every exit path the checkout and hooks directory are removed and the
+   cache is kept.
+
+The clean-worktree requirement is unchanged. The reviewer no longer reads the
+user's checkout, so the author's only obligation during a build-capable
+review is not to rewrite the branch.
 
 ## Workflow identity and persistence
 
@@ -267,8 +316,10 @@ The implemented subset, using the v2 method names, is:
 - `initialize` request carrying client name and version, followed by the
   `initialized` notification before any thread call;
 - `thread/start` for a new workflow and `thread/resume` for an existing one,
-  both configured with the read-only sandbox mode, the `never` approval policy,
-  and the worktree path;
+  both configured with the `never` approval policy and, for a read-only
+  review, the read-only sandbox mode and the worktree path, or, for a
+  build-capable review, the workspace-write sandbox mode and the disposable
+  checkout path; a thread may alternate between the two across rounds;
 - `thread/name/set` after `thread/start`, naming the thread
   `Counterpoint review: <repository> <branch>` for the Codex UIs; a refusal
   is reported as a warning, not a failure;
@@ -297,8 +348,23 @@ later round sees the earlier round's review, so the planned fallback to
 
 Counterpoint configures a read-only sandbox with network access disabled and an
 approval policy of `never` on both `thread/start` and `thread/resume`. With this
-configuration Codex should never ask for additional access. As defense in depth,
-every server-originated request still receives an explicit bounded response:
+configuration Codex should never ask for additional access.
+
+A build-capable review uses the workspace-write sandbox instead, still with
+network access disabled, and passes configuration overrides on the child's
+command line: the workflow's cache directory as the single extra writable
+root, both implicit temp roots (`/tmp` and `$TMPDIR`) excluded so a
+repository under either stays read-only, and `TMPDIR` plus
+`COUNTERPOINT_CACHE_DIR` set for the reviewer's commands through
+`shell_environment_policy`. The effective policy reported by the thread call
+must match exactly: type workspace-write, network off, both temp roots
+excluded, writable roots equal to that one directory, and the working
+directory equal to the checkout. Anything else fails closed. Counterpoint
+sets no language-specific variables; the prompt recommends `GOCACHE` under
+the cache directory and `GOPROXY=off` as the Go example.
+
+As defense in depth, every server-originated request still receives an
+explicit bounded response:
 
 - command execution and file change approvals are answered with `decline`,
   which lets the turn continue, never `cancel`, which would interrupt it;
@@ -361,7 +427,8 @@ without summarizing them away. The instructions direct Codex to:
   while still validating the whole branch, or perform a complete review when
   told that history was rewritten;
 - treat branch notes as the author's claims, not verified facts;
-- review only and never modify files;
+- review only and never modify files, or, in a build-capable review, build
+  and test in the disposable checkout without modifying tracked files;
 - carry unresolved findings from earlier rounds until resolved or explicitly
   withdrawn, and state the disposition of each prior finding;
 - prioritize concrete correctness, robustness, security, and maintainability
@@ -374,7 +441,12 @@ The instructions also tell Codex that it is running non-interactively in a
 read-only sandbox: it must not request additional permissions or user input,
 should use the best available read-only approach, complete the review
 autonomously, and report any material limitation in the review itself. This
-guidance lives in the prompt, not in the protocol-level declines.
+guidance lives in the prompt, not in the protocol-level declines. For a
+build-capable review the paragraph instead names the checkout as the working
+directory where building and testing are allowed, the cache directory and
+its variable, the offline Go example, that lint tooling is probably
+unavailable and should be reported as not run, and that the original
+repository is read-only and not the place to run anything.
 
 The instructions include the Counterpoint round number. Branch notes are
 delimited clearly as untrusted author input.
@@ -477,6 +549,17 @@ Unit tests cover:
 - unarchive-and-retry when `thread/resume` is refused, no unarchive attempt
   after a transport failure, and fail-closed when both are refused;
 - naming a new thread, with a refused name reported as a warning;
+- for build-capable reviews: the request hash unchanged for `build: false`
+  against a pinned pre-flag value and changed for `build: true`; exact
+  validation of the effective workspace-write policy against wrong roots,
+  writable temp roots, and network; hook and filter isolation while
+  populating the checkout, with a fixture whose global configuration would
+  run a post-checkout hook and a smudge filter; rejection of a scratch root
+  overlapping the repository, of a symlinked workflow directory, and of a
+  commit tracking the temp directory name; lock contention on one workflow
+  directory; replacement of a crashed round's checkout; checkout removal on
+  a completed, failed, and cancelled review with the cache kept; and the
+  warning for tracked files changed during the turn;
 - merge-base resolution against local and remote-tracking primary branches;
 - rewritten-history detection when the previous tip is no longer an ancestor;
 - stable workflow-key construction across worktrees;
@@ -497,9 +580,14 @@ Unit tests cover:
 - child process termination before lock release on every outcome.
 
 An integration test uses a fake app-server subprocess to exercise
-initialization, new-thread review, persisted restart, thread resume, and a
-second review round. Live Codex tests are manual and require explicit human
-approval because they use model capacity and local credentials.
+initialization, new-thread review, persisted restart, thread resume, a
+second review round, a build-capable round whose checkout the fake observes
+and which is gone afterwards, a round where the fake edits a tracked file, a
+policy mismatch that still removes the checkout, and a return to a
+read-only round on the worktree. The fake echoes the workspace-write policy
+it parses from the configuration overrides on its own command line. Live
+Codex tests are manual and require explicit human approval because they use
+model capacity and local credentials.
 
 ## Acceptance scenario
 
@@ -536,6 +624,10 @@ The MVP is accepted when a clean local demonstration can:
   from the catalog, and per-repository policy files.
 - A configurable review timeout.
 - Branch lifecycle management and automatic state garbage collection.
+- Eviction of the per-workflow build cache kept by build-capable reviews,
+  tracked as
+  [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15)
+  because it can be large.
 - Exact Codex CLI version enforcement.
 - Remote app-server hosts, containers, and cloud execution.
 - Push, pull-request, CI, approval, or merge automation.

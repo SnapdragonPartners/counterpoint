@@ -1,10 +1,13 @@
 # Build-capable reviews in a disposable checkout
 
-Plan for
+Design record for
 [issue 12](https://github.com/SnapdragonPartners/counterpoint/issues/12).
-This document is the first commit on its branch and is reviewed before any
-code. When the implementation lands, the durable parts move into
-`docs/MVP.md` and this file records only what was decided and why.
+This document was reviewed and accepted before any code was written, and
+the implementation on the same branch follows it. The current contract lives
+in `docs/MVP.md` under "Build-capable reviews" and "Sandbox and approvals";
+this file keeps the reasoning and the rejected alternatives. Cache retention
+is tracked as
+[issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
 
 ## Goal
 

@@ -60,7 +60,8 @@ The MVP is a Go executable that:
 - identifies workflows by canonical repository plus full branch ref;
 - persists the corresponding Codex thread IDs in a small JSON state file;
 - requires a clean worktree at the branch tip and reviews the whole branch in a
-  read-only, network-disabled Codex sandbox;
+  read-only, network-disabled Codex sandbox, or, on request, in a disposable
+  checkout of the commit where the reviewer can build and run tests offline;
 - serializes reviews across processes with a file lock and bounds each review
   with a timeout; and
 - returns Codex's review, plus any bridge warnings, to the MCP client.
@@ -127,12 +128,25 @@ promotes it. MCP servers start with the client session, so restart Claude
 Code after installing a new version.
 
 Counterpoint exposes one tool, `review`, taking `repo`, `branch`, `commit`,
-and `branch_notes`. It returns the canonical repository path, the full branch
-ref, the reviewed commit and its merge base, the round number, Codex's review
-text, any bridge warnings, and whether the result was replayed from state.
-State lives under the user configuration directory in a `counterpoint`
-subdirectory; `COUNTERPOINT_STATE_FILE` overrides the path for tests and
-unusual installations. Diagnostics go to stderr only.
+`branch_notes`, and an optional `build` flag. It returns the canonical
+repository path, the full branch ref, the reviewed commit and its merge base,
+the round number, Codex's review text, any bridge warnings, and whether the
+result was replayed from state. State lives under the user configuration
+directory in a `counterpoint` subdirectory; `COUNTERPOINT_STATE_FILE`
+overrides the path for tests and unusual installations. Diagnostics go to
+stderr only.
+
+With `build: true` the reviewer gets a disposable checkout of the commit under
+the user cache directory (`counterpoint/checkouts`, or
+`COUNTERPOINT_CHECKOUT_DIR`) and may build and run tests there, offline. The
+checkout is deleted after every review; a per-branch build cache beside it is
+kept, so expect one cold build per branch and a test run per round on top of
+the review itself, and ask for it when the change warrants that evidence. The
+reviewer's tracked-file changes in the checkout, if any, come back as a
+warning. Lint tooling that needs a download is not available to the reviewer
+and is reported as not run; CI still lints. The cache has no eviction yet
+([issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15));
+deleting directories under the scratch root is safe between reviews.
 
 Prerequisites at review time: a clean worktree checked out at the tip of a
 non-primary branch, and a locally authenticated Codex CLI.

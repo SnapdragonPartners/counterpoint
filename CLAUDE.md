@@ -83,12 +83,19 @@ handoff is normally a tool call, not a message to DR:
 - If the `counterpoint` review tool is available, call it directly with the
   absolute repository path, the branch, the exact local commit, and the branch
   notes. The commit must be the branch tip and the checked-out HEAD of a clean
-  worktree, so commit before calling and do not touch the worktree while the
-  review runs. The call blocks for the whole Codex turn, typically several
-  minutes; Claude Code moves it to a background task after two minutes and
-  delivers the result as a task notification. Do not start unrelated work that
-  changes the worktree while waiting. Submit every round through the tool, and
-  do not ask DR to relay when the tool is available.
+  worktree, so commit before calling. In a read-only review the reviewer reads
+  the worktree, so do not touch it while the review runs; in a build-capable
+  review (`build: true`) the reviewer works in a disposable checkout, and the
+  only obligation is not to rewrite the branch meanwhile. The call blocks for
+  the whole Codex turn, typically several minutes; Claude Code moves it to a
+  background task after two minutes and delivers the result as a task
+  notification. Submit every round through the tool, and do not ask DR to
+  relay when the tool is available.
+- Ask for a build-capable review when the change touches behavior that tests
+  exercise and a test run is material evidence: code changes, especially to
+  concurrency, persistence, protocol handling, or Git interaction. Keep
+  documentation-only rounds and small follow-ups read-only; a build review
+  costs a cold build per branch plus a test run per round.
 - If the tool is not available in the session, write the branch notes and ask
   DR to submit them to Codex manually, then wait for the relayed findings.
 - The Codex thread is persistent per repository and branch, so each round
@@ -101,9 +108,10 @@ handoff is normally a tool call, not a message to DR:
   Codex app so the next call can unarchive and take it over).
 - Treat the tool result as Codex's review: address every blocking finding as
   described in the workflow above, and quote the approval or the findings to
-  DR when stopping at the push gate. The reviewer runs in a read-only sandbox
-  and cannot build or run tests, so its verdict is an inspection of the commit
-  against the branch notes and the repository; the author's verification
+  DR when stopping at the push gate. In a read-only review the reviewer cannot
+  build or run tests, so its verdict is an inspection of the commit against
+  the branch notes and the repository; in a build-capable review it can, and
+  its test results are evidence. Either way the author's verification
   claims must be backed by the commands and outcomes in the notes.
 
 ### Branch notes

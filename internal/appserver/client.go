@@ -66,6 +66,65 @@ type Client struct {
 	closeOnce sync.Once
 }
 
+// Sandbox is the policy a thread is started or resumed with. The zero value
+// is the read-only sandbox on the caller's worktree.
+type Sandbox struct {
+	// Build selects workspace-write: the thread's cwd and WritableRoots are
+	// writable, the implicit /tmp and $TMPDIR roots are excluded, and
+	// network stays off. The cwd must then be a disposable checkout, never
+	// the user's repository.
+	Build bool
+	// WritableRoots is the exact set of extra writable roots expected in
+	// the effective policy when Build is set.
+	WritableRoots []string
+}
+
+// mode is the SandboxMode sent on thread/start and thread/resume.
+func (s Sandbox) mode() string {
+	if s.Build {
+		return sandboxWorkspaceWrite
+	}
+	return sandboxReadOnly
+}
+
+// BuildConfigArgs returns the -c overrides for a build-capable session: the
+// persistent cache directory as the one extra writable root, both implicit
+// temp roots excluded so a repository under /tmp or $TMPDIR stays
+// read-only, and the reviewer's TMPDIR and cache location exported to its
+// commands. Values are TOML basic strings.
+func BuildConfigArgs(cacheDir, tmpDir string) []string {
+	return []string{
+		"-c", "sandbox_workspace_write.writable_roots=[" + tomlString(cacheDir) + "]",
+		"-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+		"-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+		"-c", "shell_environment_policy.set.TMPDIR=" + tomlString(tmpDir),
+		"-c", "shell_environment_policy.set." + EnvCacheDir + "=" + tomlString(cacheDir),
+	}
+}
+
+// EnvCacheDir is the variable that tells the reviewer's commands where the
+// persistent cache directory is.
+const EnvCacheDir = "COUNTERPOINT_CACHE_DIR"
+
+// tomlString quotes s as a TOML basic string.
+func tomlString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, "\\u%04X", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 // Thread describes a started or resumed thread.
 type Thread struct {
 	ID              string
@@ -129,30 +188,30 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	return cl, nil
 }
 
-// StartThread creates a new thread rooted at cwd with the read-only
-// sandbox and the never approval policy.
-func (cl *Client) StartThread(ctx context.Context, cwd string) (Thread, error) {
+// StartThread creates a new thread rooted at cwd with the given sandbox and
+// the never approval policy.
+func (cl *Client) StartThread(ctx context.Context, cwd string, sb Sandbox) (Thread, error) {
 	var resp threadResponse
-	params := threadStartParams{Cwd: cwd, Sandbox: sandboxReadOnly, ApprovalPolicy: approvalNever}
+	params := threadStartParams{Cwd: cwd, Sandbox: sb.mode(), ApprovalPolicy: approvalNever}
 	if err := cl.c.call(ctx, methodThreadStart, params, &resp); err != nil {
 		return Thread{}, err
 	}
-	return threadFromResponse(resp, cwd)
+	return threadFromResponse(resp, cwd, sb)
 }
 
-// ResumeThread resumes threadID at cwd with the same sandbox and approval
-// settings. A thread the app-server cannot find is an error; the caller
-// fails closed rather than starting a replacement.
-func (cl *Client) ResumeThread(ctx context.Context, threadID, cwd string) (Thread, error) {
+// ResumeThread resumes threadID at cwd with the given sandbox and the never
+// approval policy. A thread the app-server cannot find is an error; the
+// caller fails closed rather than starting a replacement.
+func (cl *Client) ResumeThread(ctx context.Context, threadID, cwd string, sb Sandbox) (Thread, error) {
 	var resp threadResponse
-	params := threadResumeParams{ThreadID: threadID, Cwd: cwd, Sandbox: sandboxReadOnly, ApprovalPolicy: approvalNever}
+	params := threadResumeParams{ThreadID: threadID, Cwd: cwd, Sandbox: sb.mode(), ApprovalPolicy: approvalNever}
 	if err := cl.c.call(ctx, methodThreadResume, params, &resp); err != nil {
 		return Thread{}, err
 	}
 	if resp.Thread.ID != threadID {
 		return Thread{}, fmt.Errorf("%w: resume returned thread %q, requested %q", ErrPolicyMismatch, resp.Thread.ID, threadID)
 	}
-	return threadFromResponse(resp, cwd)
+	return threadFromResponse(resp, cwd, sb)
 }
 
 // UnarchiveThread restores an archived thread so it can be resumed. The
@@ -188,10 +247,10 @@ func (cl *Client) AddWarning(w string) {
 }
 
 // threadFromResponse validates what the server reports back and fails
-// closed unless the effective policy is the read-only sandbox without
-// network access with the never approval policy, and the effective working
-// directory is exactly the canonical path that was requested.
-func threadFromResponse(resp threadResponse, requestedCwd string) (Thread, error) {
+// closed unless the effective policy is exactly the requested sandbox
+// without network access with the never approval policy, and the effective
+// working directory is exactly the canonical path that was requested.
+func threadFromResponse(resp threadResponse, requestedCwd string, sb Sandbox) (Thread, error) {
 	if resp.Thread.ID == "" {
 		return Thread{}, fmt.Errorf("%w: thread response has no id", ErrIncompatible)
 	}
@@ -202,14 +261,77 @@ func threadFromResponse(resp threadResponse, requestedCwd string) (Thread, error
 	if err := json.Unmarshal(resp.ApprovalPolicy, &approval); err != nil || approval != approvalNever {
 		return Thread{}, fmt.Errorf("%w: effective approval policy is %s", ErrPolicyMismatch, string(resp.ApprovalPolicy))
 	}
-	if resp.Sandbox.Type != sandboxPolicyReadOnly || resp.Sandbox.NetworkAccess {
-		return Thread{}, fmt.Errorf("%w: effective sandbox is %q with networkAccess=%v", ErrPolicyMismatch, resp.Sandbox.Type, resp.Sandbox.NetworkAccess)
+	if err := checkSandbox(resp.Sandbox, sb); err != nil {
+		return Thread{}, err
 	}
 	t := Thread{ID: resp.Thread.ID, Model: resp.Model}
 	if resp.ReasoningEffort != nil {
 		t.ReasoningEffort = *resp.ReasoningEffort
 	}
 	return t, nil
+}
+
+// checkSandbox compares the effective policy with the requested one. For a
+// build session every workspace-write field is checked: the writable roots
+// must be exactly the expected set, both implicit temp roots must be
+// excluded, and network must be off. Anything else could leave a path
+// outside the disposable checkout writable.
+func checkSandbox(got sandboxPolicy, want Sandbox) error {
+	if got.NetworkAccess {
+		return fmt.Errorf("%w: effective sandbox %q has networkAccess=true", ErrPolicyMismatch, got.Type)
+	}
+	if !want.Build {
+		if got.Type != sandboxPolicyReadOnly {
+			return fmt.Errorf("%w: effective sandbox is %q, requested read-only", ErrPolicyMismatch, got.Type)
+		}
+		return nil
+	}
+	if got.Type != sandboxPolicyWorkspaceWrite {
+		return fmt.Errorf("%w: effective sandbox is %q, requested workspace-write", ErrPolicyMismatch, got.Type)
+	}
+	if !got.ExcludeSlashTmp || !got.ExcludeTmpdirEnvVar {
+		return fmt.Errorf("%w: effective sandbox keeps a temp root writable (excludeSlashTmp=%v excludeTmpdirEnvVar=%v)", ErrPolicyMismatch, got.ExcludeSlashTmp, got.ExcludeTmpdirEnvVar)
+	}
+	if !sameSet(got.WritableRoots, want.WritableRoots) {
+		return fmt.Errorf("%w: effective writable roots %q, expected %q", ErrPolicyMismatch, got.WritableRoots, want.WritableRoots)
+	}
+	return nil
+}
+
+// sameSet reports whether a and b hold the same strings, in any order and
+// without duplicates.
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, s := range a {
+		if seen[s] {
+			return false
+		}
+		seen[s] = true
+	}
+	for _, s := range b {
+		if !seen[s] {
+			return false
+		}
+	}
+	return true
+}
+
+// AppendWarning adds w to a completed review's warning list under the same
+// entry and byte bounds the client applies while a turn runs. It reports
+// false, leaving the list unchanged, when a bound would be exceeded; the
+// caller logs the warning either way.
+func AppendWarning(list []string, w string) ([]string, bool) {
+	total := 0
+	for _, s := range list {
+		total += len(s)
+	}
+	if len(list) >= maxWarnings || total+len(w) > maxWarningBytes {
+		return list, false
+	}
+	return append(list, w), true
 }
 
 // Review runs an inline custom review on threadID and blocks until the

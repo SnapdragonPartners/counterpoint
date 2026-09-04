@@ -72,13 +72,15 @@ const (
 
 // Protocol values.
 const (
-	sandboxReadOnly       = "read-only"
-	sandboxPolicyReadOnly = "readOnly"
-	approvalNever         = "never"
-	reviewDeliveryInline  = "inline"
-	reviewTargetCustom    = "custom"
-	decisionDecline       = "decline"
-	legacyDecisionDenied  = "denied"
+	sandboxReadOnly             = "read-only"
+	sandboxWorkspaceWrite       = "workspace-write"
+	sandboxPolicyReadOnly       = "readOnly"
+	sandboxPolicyWorkspaceWrite = "workspaceWrite"
+	approvalNever               = "never"
+	reviewDeliveryInline        = "inline"
+	reviewTargetCustom          = "custom"
+	decisionDecline             = "decline"
+	legacyDecisionDenied        = "denied"
 
 	turnStatusCompleted   = "completed"
 	turnStatusFailed      = "failed"
@@ -144,10 +146,14 @@ type threadResponse struct {
 	Cwd             string          `json:"cwd"`
 }
 
-// sandboxPolicy is the effective sandbox reported on thread responses.
+// sandboxPolicy is the effective sandbox reported on thread responses. The
+// workspace-write fields are absent on a read-only policy.
 type sandboxPolicy struct {
-	Type          string `json:"type"`
-	NetworkAccess bool   `json:"networkAccess"`
+	Type                string   `json:"type"`
+	NetworkAccess       bool     `json:"networkAccess"`
+	WritableRoots       []string `json:"writableRoots"`
+	ExcludeSlashTmp     bool     `json:"excludeSlashTmp"`
+	ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar"`
 }
 
 type reviewStartParams struct {

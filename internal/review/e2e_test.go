@@ -2,6 +2,9 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/SnapdragonPartners/counterpoint/internal/appserver"
 	"github.com/SnapdragonPartners/counterpoint/internal/appserver/apptest"
+	"github.com/SnapdragonPartners/counterpoint/internal/gitrepo"
 	"github.com/SnapdragonPartners/counterpoint/internal/state"
 )
 
@@ -29,6 +33,7 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 	repo := newTestRepo(t)
 	statePath := filepath.Join(t.TempDir(), "counterpoint", "state.json")
 	fakeState := filepath.Join(t.TempDir(), "fake-threads")
+	checkoutRoot := filepath.Join(t.TempDir(), "checkouts")
 	t.Setenv(apptest.ScenarioEnv, "normal")
 	t.Setenv(apptest.StateEnv, fakeState)
 
@@ -37,11 +42,13 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 		return New(Options{
 			Store:  state.NewStore(statePath),
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-			NewReviewer: func(ctx context.Context) (Reviewer, error) {
+			NewReviewer: func(ctx context.Context, extraArgs []string) (Reviewer, error) {
 				spawns++
-				return appserver.Start(ctx, appserver.Options{Command: os.Args[0], Version: "test", Stderr: io.Discard,
+				args := append(appserver.DefaultArgs(), extraArgs...)
+				return appserver.Start(ctx, appserver.Options{Command: os.Args[0], Args: args, Version: "test", Stderr: io.Discard,
 					Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 			},
+			CheckoutRoot: checkoutRoot,
 		})
 	}
 	req := func(commit, notes string) Request {
@@ -99,6 +106,75 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 	wantName := "name:thr_1:Counterpoint review: " + filepath.Base(repo.dir) + " feature"
 	if got := string(events); !strings.Contains(got, "unarchive:thr_1") || !strings.Contains(got, wantName) {
 		t.Errorf("fake events lack the unarchive and name requests:\n%s", got)
+	}
+
+	// Round four is build-capable: the thread moves to a disposable
+	// checkout under workspace-write, the fake sees the temp directory
+	// there at turn start, and the checkout is gone afterwards.
+	t.Setenv(apptest.ScenarioEnv, "normal")
+	d := repo.commit("feature-4")
+	four, err := newService().Review(context.Background(), Request{Repo: repo.dir, Branch: "feature", Commit: d, BranchNotes: "Round four: please build.", Build: true})
+	if err != nil {
+		t.Fatalf("round four: %v", err)
+	}
+	if four.Round != 4 || !strings.Contains(four.Review, "REVIEW for thr_1") || len(four.Warnings) != 0 {
+		t.Fatalf("round four result = %+v", four)
+	}
+	opened, err := gitrepo.Open(context.Background(), repo.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(checkoutRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(gitrepo.WorkflowKey(opened.Identity(), "refs/heads/feature")))
+	workflowDir := filepath.Join(resolvedRoot, hex.EncodeToString(sum[:])[:16])
+	checkoutDir := filepath.Join(workflowDir, "checkout")
+	events, _ = os.ReadFile(fakeState + ".events")
+	for _, want := range []string{"cwd:" + checkoutDir + ":workspace-write", "checkout-tmp:" + checkoutDir + ":true"} {
+		if !strings.Contains(string(events), want) {
+			t.Errorf("fake events lack %q:\n%s", want, events)
+		}
+	}
+	if _, err := os.Stat(checkoutDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("checkout %s survived the review: %v", checkoutDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(workflowDir, "cache")); err != nil {
+		t.Errorf("cache dir missing: %v", err)
+	}
+
+	// A reviewer that edits a tracked file in the checkout is reported.
+	t.Setenv(apptest.ScenarioEnv, "modify-checkout")
+	e := repo.commit("feature-5")
+	five, err := newService().Review(context.Background(), Request{Repo: repo.dir, Branch: "feature", Commit: e, BranchNotes: "Round five.", Build: true})
+	if err != nil {
+		t.Fatalf("round five: %v", err)
+	}
+	if len(five.Warnings) != 1 || !strings.Contains(five.Warnings[0], "changed 1 tracked file") {
+		t.Errorf("round five warnings = %v, want the integrity warning", five.Warnings)
+	}
+
+	// An effective policy with an unexpected writable root fails closed,
+	// and the checkout is still removed.
+	t.Setenv(apptest.ScenarioEnv, "workspace-wrong-roots")
+	f := repo.commit("feature-6")
+	if _, err := newService().Review(context.Background(), Request{Repo: repo.dir, Branch: "feature", Commit: f, BranchNotes: "Round six.", Build: true}); !errors.Is(err, appserver.ErrPolicyMismatch) {
+		t.Fatalf("wrong roots error = %v, want ErrPolicyMismatch", err)
+	}
+	if _, err := os.Stat(checkoutDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("checkout survived a policy mismatch: %v", err)
+	}
+
+	// Back to a read-only round on the worktree with the same thread.
+	t.Setenv(apptest.ScenarioEnv, "normal")
+	six, err := newService().Review(context.Background(), req(f, "Round six, read-only."))
+	if err != nil || six.Round != 6 {
+		t.Fatalf("read-only round after build rounds = %+v, %v", six, err)
+	}
+	events, _ = os.ReadFile(fakeState + ".events")
+	if !strings.Contains(string(events), "cwd:"+repo.dir+":read-only") {
+		t.Errorf("fake events lack the read-only resume on the worktree:\n%s", events)
 	}
 	if status := repo.git("status", "--porcelain"); status != "" {
 		t.Errorf("repository modified by reviews:\n%s", status)

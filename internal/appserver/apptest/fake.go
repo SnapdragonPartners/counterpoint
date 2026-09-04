@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,9 +90,20 @@ type turnInterruptParams struct {
 	TurnID string `json:"turnId"`
 }
 
+// workspaceConfig is what the fake parsed from -c overrides on its command
+// line, echoed back as the effective workspace-write policy so the client's
+// exact-policy check runs against what was actually configured.
+type workspaceConfig struct {
+	writableRoots       []string
+	excludeSlashTmp     bool
+	excludeTmpdirEnvVar bool
+	env                 map[string]string
+}
+
 type fakeServer struct {
 	scenario  string
 	statePath string
+	config    workspaceConfig
 
 	writeMu sync.Mutex
 	out     *bufio.Writer
@@ -98,7 +111,8 @@ type fakeServer struct {
 	mu          sync.Mutex
 	initialized bool
 	threads     map[string]bool
-	archived    map[string]bool // archived scenario: stored threads start archived
+	archived    map[string]bool   // archived scenario: stored threads start archived
+	cwds        map[string]string // thread id -> cwd of the last start or resume
 	nextThread  int
 	nextTurn    int
 	nextSrvID   int
@@ -113,9 +127,11 @@ func Run(scenario, statePath string) int {
 	f := &fakeServer{
 		scenario:   scenario,
 		statePath:  statePath,
+		config:     parseConfigArgs(os.Args[1:]),
 		out:        bufio.NewWriter(os.Stdout),
 		threads:    map[string]bool{},
 		archived:   map[string]bool{},
+		cwds:       map[string]string{},
 		srvPending: map[string]chan envelope{},
 		interrupts: map[string]chan struct{}{},
 	}
@@ -142,6 +158,47 @@ func Run(scenario, statePath string) int {
 		time.Sleep(time.Minute)
 	}
 	return 0
+}
+
+// parseConfigArgs reads the -c key=value overrides the client passes, with
+// the minimal TOML the client emits: booleans, basic strings, and arrays of
+// basic strings.
+func parseConfigArgs(args []string) workspaceConfig {
+	cfg := workspaceConfig{env: map[string]string{}}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "-c" {
+			continue
+		}
+		key, value, ok := strings.Cut(args[i+1], "=")
+		if !ok {
+			continue
+		}
+		switch {
+		case key == "sandbox_workspace_write.writable_roots":
+			inner := strings.TrimSuffix(strings.TrimPrefix(value, "["), "]")
+			for _, item := range strings.Split(inner, ",") {
+				if item = strings.TrimSpace(item); item != "" {
+					cfg.writableRoots = append(cfg.writableRoots, tomlUnquote(item))
+				}
+			}
+		case key == "sandbox_workspace_write.exclude_slash_tmp":
+			cfg.excludeSlashTmp = value == "true"
+		case key == "sandbox_workspace_write.exclude_tmpdir_env_var":
+			cfg.excludeTmpdirEnvVar = value == "true"
+		case strings.HasPrefix(key, "shell_environment_policy.set."):
+			cfg.env[strings.TrimPrefix(key, "shell_environment_policy.set.")] = tomlUnquote(value)
+		}
+	}
+	return cfg
+}
+
+// tomlUnquote decodes a TOML basic string; the escapes the client emits are
+// a subset of Go's.
+func tomlUnquote(s string) string {
+	if u, err := strconv.Unquote(s); err == nil {
+		return u
+	}
+	return s
 }
 
 func (f *fakeServer) loadThreads() {
@@ -274,6 +331,37 @@ func (f *fakeServer) handle(env *envelope) {
 	}
 }
 
+// observeCheckout records, at turn start, whether the thread's cwd holds
+// the reviewer's temp directory and, in the modify-checkout scenario,
+// appends to the first tracked-looking file there, as a misbehaving
+// reviewer would.
+func (f *fakeServer) observeCheckout(cwd string) {
+	if cwd == "" {
+		return
+	}
+	_, err := os.Stat(filepath.Join(cwd, ".counterpoint-tmp"))
+	f.recordEvent(fmt.Sprintf("checkout-tmp:%s:%v", cwd, err == nil))
+	if f.scenario != "modify-checkout" {
+		return
+	}
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() && !strings.HasPrefix(e.Name(), ".") {
+			path := filepath.Join(cwd, e.Name())
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // test fake writing inside its own checkout
+			if err == nil {
+				_, _ = file.WriteString("\nmodified by the fake reviewer\n")
+				_ = file.Close()
+				f.recordEvent("modified:" + path)
+			}
+			return
+		}
+	}
+}
+
 func (f *fakeServer) requireInit(id json.RawMessage) bool {
 	f.mu.Lock()
 	ok := f.initialized
@@ -284,7 +372,25 @@ func (f *fakeServer) requireInit(id json.RawMessage) bool {
 	return ok
 }
 
-func (f *fakeServer) threadResult(id, cwd string) map[string]any {
+func (f *fakeServer) threadResult(id, cwd, sandbox string) map[string]any {
+	policy := map[string]any{"type": "readOnly", "networkAccess": false}
+	if sandbox == "workspace-write" {
+		roots := append([]string{}, f.config.writableRoots...)
+		if f.scenario == "workspace-wrong-roots" {
+			roots = append(roots, "/extra/root")
+		}
+		if roots == nil {
+			roots = []string{}
+		}
+		policy = map[string]any{
+			"type": "workspaceWrite", "networkAccess": false, "writableRoots": roots,
+			"excludeSlashTmp": f.config.excludeSlashTmp, "excludeTmpdirEnvVar": f.config.excludeTmpdirEnvVar,
+		}
+	}
+	f.recordEvent("cwd:" + cwd + ":" + sandbox)
+	f.mu.Lock()
+	f.cwds[id] = cwd
+	f.mu.Unlock()
 	return map[string]any{
 		"thread":          map[string]any{"id": id, "cwd": cwd},
 		"model":           "fake-model",
@@ -292,7 +398,7 @@ func (f *fakeServer) threadResult(id, cwd string) map[string]any {
 		"cwd":             cwd,
 		"modelProvider":   "fake",
 		"approvalPolicy":  "never",
-		"sandbox":         map[string]any{"type": "readOnly", "networkAccess": false},
+		"sandbox":         policy,
 	}
 }
 
@@ -303,8 +409,8 @@ func (f *fakeServer) handleThreadStart(env *envelope) {
 	var p threadStartParams
 	// Literal protocol values, deliberately not the package constants, so a
 	// wrong constant in the client cannot pass by matching itself.
-	if json.Unmarshal(env.Params, &p) != nil || p.Cwd == "" || p.Sandbox != "read-only" || p.ApprovalPolicy != "never" {
-		f.fail(env.ID, -32602, fmt.Sprintf("thread/start requires cwd, sandbox read-only and approvalPolicy never; got %s", env.Params))
+	if json.Unmarshal(env.Params, &p) != nil || p.Cwd == "" || !validSandbox(p.Sandbox) || p.ApprovalPolicy != "never" {
+		f.fail(env.ID, -32602, fmt.Sprintf("thread/start requires cwd, sandbox read-only or workspace-write, and approvalPolicy never; got %s", env.Params))
 		return
 	}
 	f.mu.Lock()
@@ -322,7 +428,7 @@ func (f *fakeServer) handleThreadStart(env *envelope) {
 	f.mu.Unlock()
 
 	// reorder: answer the second request first, then the held first one.
-	result := f.threadResult(id, p.Cwd)
+	result := f.threadResult(id, p.Cwd, p.Sandbox)
 	switch f.scenario {
 	case "wrong-policy":
 		result["sandbox"] = map[string]any{"type": "workspaceWrite", "networkAccess": true}
@@ -356,7 +462,7 @@ func (f *fakeServer) handleThreadStart(env *envelope) {
 		f.threads[heldID] = true
 		f.saveThreads()
 		f.mu.Unlock()
-		f.respond(held.ID, f.threadResult(heldID, p.Cwd))
+		f.respond(held.ID, f.threadResult(heldID, p.Cwd, p.Sandbox))
 	}
 }
 
@@ -365,8 +471,8 @@ func (f *fakeServer) handleThreadResume(env *envelope) {
 		return
 	}
 	var p threadResumeParams
-	if json.Unmarshal(env.Params, &p) != nil || p.Cwd == "" || p.Sandbox != "read-only" || p.ApprovalPolicy != "never" {
-		f.fail(env.ID, -32602, "thread/resume requires cwd, read-only sandbox and never approval")
+	if json.Unmarshal(env.Params, &p) != nil || p.Cwd == "" || !validSandbox(p.Sandbox) || p.ApprovalPolicy != "never" {
+		f.fail(env.ID, -32602, "thread/resume requires cwd, a read-only or workspace-write sandbox, and never approval")
 		return
 	}
 	f.mu.Lock()
@@ -391,7 +497,13 @@ func (f *fakeServer) handleThreadResume(env *envelope) {
 	if f.scenario == "resume-other-id" {
 		returned = "thr_impostor"
 	}
-	f.respond(env.ID, f.threadResult(returned, p.Cwd))
+	f.respond(env.ID, f.threadResult(returned, p.Cwd, p.Sandbox))
+}
+
+// validSandbox accepts the two modes the client may request, as literal
+// protocol strings.
+func validSandbox(mode string) bool {
+	return mode == "read-only" || mode == "workspace-write"
 }
 
 // handleThreadUnarchive mirrors codex-cli 0.153.1: unarchive needs the
@@ -460,6 +572,7 @@ func (f *fakeServer) handleReviewStart(env *envelope) {
 	}
 	f.mu.Lock()
 	known := f.threads[p.ThreadID]
+	cwd := f.cwds[p.ThreadID]
 	f.nextTurn++
 	turnID := fmt.Sprintf("turn_%d", f.nextTurn)
 	interrupt := make(chan struct{})
@@ -469,6 +582,7 @@ func (f *fakeServer) handleReviewStart(env *envelope) {
 		f.fail(env.ID, -32602, "thread not found: "+p.ThreadID)
 		return
 	}
+	f.observeCheckout(cwd)
 
 	threadID := p.ThreadID
 	reviewThreadID := threadID

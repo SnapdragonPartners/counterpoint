@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/SnapdragonPartners/counterpoint/internal/appserver"
 )
 
 // Prompt describes one review request to Codex. The instructions are the
@@ -21,7 +23,14 @@ type Prompt struct {
 	PreviousTip      string
 	HistoryRewritten bool
 	BranchNotes      string
+	// Checkout, when set, is the disposable checkout the reviewer works in
+	// for a build-capable review, and CacheDir is its persistent cache.
+	Checkout string
+	CacheDir string
 }
+
+// appserverEnvCacheDir names the cache directory variable in the prompt.
+const appserverEnvCacheDir = appserver.EnvCacheDir
 
 // headline is the first line of every prompt; tests and the fake app-server
 // key on it.
@@ -37,16 +46,36 @@ func (p Prompt) Build() string {
 An authoring agent has committed work on a branch and asks you to review it.
 Your review is returned verbatim to the author, who will either fix findings in a further commit and ask again on this same conversation, or stop for a human once you approve.
 
-You are running non-interactively in a read-only sandbox.
+`)
+	if p.Checkout != "" {
+		fmt.Fprintf(&b, `You are running non-interactively in a sandbox without network access.
+Your working directory, %s, is a disposable checkout of the commit under review, made for this round and deleted afterwards. You may build and run tests there; build output and temp files belong there, and test results from it are evidence you may cite.
+%s is the one writable location outside the checkout, kept between rounds for build caches. For Go, use GOCACHE=$%s/go-build GOPROXY=off so a missing module fails fast instead of hanging.
+Lint tooling is probably unavailable offline; if so, run the checks you can and report lint as not run.
+Do not modify tracked files in the checkout: the review must describe the commit, and any change is reported to the author.
+The original repository at %s is read-only and not the place to run anything.
+Do not request additional permissions or user input; complete the review autonomously and report any material limitation in the review.
+
+`, p.Checkout, p.CacheDir, appserverEnvCacheDir, p.Worktree)
+	} else {
+		b.WriteString(`You are running non-interactively in a read-only sandbox.
 Do not request additional permissions or user input.
 Use the best available read-only approach, complete the review autonomously, and report any material limitation in the review.
 Never modify files, refs, or the index.
 
 `)
+	}
 	fmt.Fprintf(&b, "Target\n")
 	fmt.Fprintf(&b, "- Repository worktree: %s\n", p.Worktree)
+	if p.Checkout != "" {
+		fmt.Fprintf(&b, "- Disposable checkout (your cwd): %s\n", p.Checkout)
+	}
 	fmt.Fprintf(&b, "- Branch: %s\n", p.BranchRef)
-	fmt.Fprintf(&b, "- Commit under review: %s (the branch tip; the worktree is checked out at it and clean)\n", p.Commit)
+	if p.Checkout != "" {
+		fmt.Fprintf(&b, "- Commit under review: %s (the branch tip; your checkout is at it and clean)\n", p.Commit)
+	} else {
+		fmt.Fprintf(&b, "- Commit under review: %s (the branch tip; the worktree is checked out at it and clean)\n", p.Commit)
+	}
 	fmt.Fprintf(&b, "- Primary branch: %s (%s)\n", p.PrimaryName, p.PrimaryRef)
 	fmt.Fprintf(&b, "- Merge base with the primary branch: %s\n", p.Base)
 	fmt.Fprintf(&b, "- Review the complete branch diff: git diff %s %s, with git log %s..%s for history.\n\n", p.Base, p.Commit, p.Base, p.Commit)
