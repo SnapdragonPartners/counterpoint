@@ -447,8 +447,8 @@ func TestCancellationBeforeResponseInterruptsKnownTurn(t *testing.T) {
 	defer cancel()
 
 	_, err := cl.Review(ctx, th.ID, "x")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Review error = %v, want DeadlineExceeded", err)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrTurnInterrupted) {
+		t.Fatalf("Review error = %v, want ErrTurnInterrupted wrapping DeadlineExceeded", err)
 	}
 	events, _ := os.ReadFile(statePath + ".events")
 	if !strings.Contains(string(events), "interrupt:turn_1") {
@@ -506,5 +506,63 @@ func TestWriterExitsOnCloseAndOnChildExit(t *testing.T) {
 	}
 	if _, err := cl2.StartThread(context.Background(), "/work/tree"); !errors.Is(err, ErrProcessExited) {
 		t.Errorf("send after child exit error = %v, want ErrProcessExited", err)
+	}
+}
+
+func TestResumeReturningAnotherThreadFailsClosed(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "threads")
+	cl, _ := fakeClient(t, "resume-other-id", statePath)
+	th := startThread(t, cl)
+	_, err := cl.ResumeThread(context.Background(), th.ID, "/work/tree")
+	if !errors.Is(err, ErrPolicyMismatch) {
+		t.Fatalf("ResumeThread error = %v, want ErrPolicyMismatch", err)
+	}
+}
+
+func TestAwaitTurnPrefersFinishedTurn(t *testing.T) {
+	// Both channels already closed: a plain select would choose at random,
+	// so repeat enough times that a random choice cannot pass.
+	done := make(chan struct{})
+	closed := make(chan struct{})
+	close(done)
+	close(closed)
+	for i := 0; i < 2000; i++ {
+		if got := awaitTurn(done, closed, nil); got != turnFinished {
+			t.Fatalf("iteration %d: awaitTurn = %v, want turnFinished", i, got)
+		}
+		if got := awaitTurn(done, nil, closed); got != turnFinished {
+			t.Fatalf("iteration %d: awaitTurn with cancellation = %v, want turnFinished", i, got)
+		}
+	}
+	open := make(chan struct{})
+	if got := awaitTurn(open, closed, nil); got != connectionClosed {
+		t.Errorf("awaitTurn(open, closed) = %v, want connectionClosed", got)
+	}
+	if got := awaitTurn(open, nil, closed); got != callerCancelled {
+		t.Errorf("awaitTurn(open, cancelled) = %v, want callerCancelled", got)
+	}
+}
+
+func TestPendingCallReportsTypedTransportError(t *testing.T) {
+	cl, _ := fakeClient(t, "normal", "")
+	startThread(t, cl)
+
+	result := make(chan error, 1)
+	go func() { result <- cl.c.call(context.Background(), "test/ping", nil, nil) }()
+	// Let the call become pending, then terminate with a specific reason.
+	time.Sleep(100 * time.Millisecond)
+	cl.c.terminate(ErrWriteBacklog)
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrWriteBacklog) {
+			t.Fatalf("pending call error = %v, want ErrWriteBacklog", err)
+		}
+		var rpcErr *rpcError
+		if errors.As(err, &rpcErr) {
+			t.Errorf("pending call error %v is a synthetic RPC error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending call did not return after termination")
 	}
 }

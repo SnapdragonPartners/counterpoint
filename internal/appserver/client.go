@@ -146,6 +146,9 @@ func (cl *Client) ResumeThread(ctx context.Context, threadID, cwd string) (Threa
 	if err := cl.c.call(ctx, methodThreadResume, params, &resp); err != nil {
 		return Thread{}, err
 	}
+	if resp.Thread.ID != threadID {
+		return Thread{}, fmt.Errorf("%w: resume returned thread %q, requested %q", ErrPolicyMismatch, resp.Thread.ID, threadID)
+	}
 	return threadFromResponse(resp, cwd)
 }
 
@@ -195,6 +198,7 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		if ctx.Err() != nil {
 			if known := w.knownTurn(); known != "" {
 				cl.interrupt(ctx, threadID, known, w)
+				return nil, fmt.Errorf("%w: %w", ErrTurnInterrupted, err)
 			}
 		}
 		return nil, err
@@ -207,11 +211,11 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 	}
 	w.setTurn(resp.Turn.ID)
 
-	select {
-	case <-w.done:
-	case <-cl.c.closed:
+	switch awaitTurn(w.done, cl.c.closed, ctx.Done()) {
+	case turnFinished:
+	case connectionClosed:
 		return nil, fmt.Errorf("review: %w", cl.c.closedErr())
-	case <-ctx.Done():
+	case callerCancelled:
 		cl.interrupt(ctx, threadID, resp.Turn.ID, w)
 		return nil, fmt.Errorf("%w: %w", ErrTurnInterrupted, ctx.Err())
 	}
@@ -231,6 +235,41 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		return nil, fmt.Errorf("%w by app-server", ErrTurnInterrupted)
 	default:
 		return nil, fmt.Errorf("%w: unexpected terminal status %q", ErrTurnFailed, final.status)
+	}
+}
+
+// waitOutcome is the result of awaitTurn.
+type waitOutcome int
+
+const (
+	turnFinished waitOutcome = iota
+	connectionClosed
+	callerCancelled
+)
+
+// awaitTurn waits for the turn's terminal event, the connection closing, or
+// the caller giving up. A finished turn has priority: when the connection
+// closes right after the terminal event, both channels are ready and Go's
+// select would pick at random, so the done channel is rechecked before a
+// completed review is discarded.
+func awaitTurn(done, closed, cancelled <-chan struct{}) waitOutcome {
+	select {
+	case <-done:
+		return turnFinished
+	case <-closed:
+		select {
+		case <-done:
+			return turnFinished
+		default:
+			return connectionClosed
+		}
+	case <-cancelled:
+		select {
+		case <-done:
+			return turnFinished
+		default:
+			return callerCancelled
+		}
 	}
 }
 

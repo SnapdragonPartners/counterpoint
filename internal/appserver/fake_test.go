@@ -177,6 +177,8 @@ func (f *fakeServer) handle(env *envelope) {
 		f.handleThreadResume(env)
 	case "review/start":
 		f.handleReviewStart(env)
+	case "test/ping":
+		// Never answered: lets tests hold a call pending.
 	case "turn/interrupt":
 		var p turnInterruptParams
 		_ = json.Unmarshal(env.Params, &p)
@@ -295,7 +297,11 @@ func (f *fakeServer) handleThreadResume(env *envelope) {
 		f.fail(env.ID, -32602, "thread not found: "+p.ThreadID)
 		return
 	}
-	f.respond(env.ID, f.threadResult(p.ThreadID, p.Cwd))
+	returned := p.ThreadID
+	if f.scenario == "resume-other-id" {
+		returned = "thr_impostor"
+	}
+	f.respond(env.ID, f.threadResult(returned, p.Cwd))
 }
 
 func (f *fakeServer) handleReviewStart(env *envelope) {

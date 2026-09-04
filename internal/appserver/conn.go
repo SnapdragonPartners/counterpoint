@@ -235,12 +235,14 @@ func (c *conn) shutdown(err error) {
 	if c.exitErr == nil {
 		c.exitErr = err
 	}
-	err = c.exitErr
 	pending := c.pending
 	c.pending = map[int64]chan envelope{}
 	c.mu.Unlock()
+	// Pending calls are woken by closing their channels, never by a
+	// synthetic RPC error, so they report the typed connection error
+	// recorded above and errors.Is keeps working for callers.
 	for _, ch := range pending {
-		ch <- envelope{Error: &rpcError{Message: err.Error()}}
+		close(ch)
 	}
 	close(c.closed)
 	c.stopWriting()
@@ -263,13 +265,11 @@ func (c *conn) call(ctx context.Context, method string, params, result any) erro
 	}
 
 	select {
-	case env := <-ch:
+	case env, ok := <-ch:
+		if !ok {
+			return fmt.Errorf("%s: %w", method, c.closedErr())
+		}
 		if env.Error != nil {
-			select {
-			case <-c.closed:
-				return fmt.Errorf("%s: %w", method, c.closedErr())
-			default:
-			}
 			return fmt.Errorf("%s: %w", method, env.Error)
 		}
 		if result != nil && len(env.Result) > 0 {
