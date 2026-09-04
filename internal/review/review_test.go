@@ -335,3 +335,69 @@ func TestMovedMergeBaseIsANewRound(t *testing.T) {
 		t.Errorf("after primary moved to %s: replayed=%v round=%d base=%s", mainTip, res.Replayed, res.Round, res.Base)
 	}
 }
+
+func TestIncompleteStoredWorkflowFailsClosed(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
+	key := gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
+	st, _ := h.store.Load()
+	st.Put(key, state.Workflow{ThreadID: "", LastCommit: tip, Round: 1, LastReview: "r"})
+	if err := h.store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := h.svc.Review(context.Background(), h.request(tip, "r2"))
+	if !errors.Is(err, ErrStateInvalid) || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), h.store.Path()) {
+		t.Fatalf("error = %v, want ErrStateInvalid naming the workflow and state file", err)
+	}
+	if h.spawns != 0 || len(h.reviewer.started) != 0 {
+		t.Error("a replacement thread was started for incomplete state")
+	}
+}
+
+func TestOversizedBranchNotesAreRejected(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	_, err := h.svc.Review(context.Background(), h.request(tip, strings.Repeat("n", MaxBranchNotesBytes+1)))
+	if !errors.Is(err, ErrInvalidRequest) || h.spawns != 0 {
+		t.Fatalf("error = %v, spawns = %d; want ErrInvalidRequest and no spawn", err, h.spawns)
+	}
+}
+
+// lockProbeReviewer records, when closed, whether the review lock was still
+// held: Close must run before the lock is released.
+type lockProbeReviewer struct {
+	fakeReviewer
+	lockPath    string
+	heldOnClose bool
+}
+
+func (l *lockProbeReviewer) Close() {
+	_, err := state.AcquireLock(context.Background(), l.lockPath, 0)
+	l.heldOnClose = errors.Is(err, state.ErrLocked)
+	l.fakeReviewer.Close()
+}
+
+func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
+	h := newHarness(t)
+	probe := &lockProbeReviewer{lockPath: h.store.LockPath()}
+	probe.blockUntilCtx = true
+	h.svc.newReviewer = func(context.Context) (Reviewer, error) { return probe, nil }
+	tip := h.repo.git("rev-parse", "HEAD")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	_, err := h.svc.Review(ctx, h.request(tip, "r1"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if probe.closed != 1 || !probe.heldOnClose {
+		t.Errorf("closed=%d heldOnClose=%v; want the reviewer closed while the lock was still held", probe.closed, probe.heldOnClose)
+	}
+	if l, err := state.AcquireLock(context.Background(), h.store.LockPath(), time.Second); err != nil {
+		t.Errorf("lock not released after cancellation: %v", err)
+	} else {
+		_ = l.Release()
+	}
+}

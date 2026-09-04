@@ -211,6 +211,9 @@ func (f *fakeServer) handle(env *envelope) {
 
 	switch env.Method {
 	case "initialize":
+		if f.scenario == "stall-init" {
+			return // never answered; the client must be able to give up
+		}
 		if f.scenario == "bad-init" {
 			f.fail(env.ID, -32000, "initialize rejected")
 			return

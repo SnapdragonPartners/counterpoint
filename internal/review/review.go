@@ -25,14 +25,40 @@ const (
 	// ReasoningEffort is the fixed reviewer effort for the MVP, passed to
 	// the app-server as a configuration override.
 	ReasoningEffort = "xhigh"
+
+	// StartupTimeout bounds launching the app-server and its initialize
+	// handshake, which happen before the review timer starts.
+	StartupTimeout = 60 * time.Second
+
+	// MaxBranchNotesBytes bounds the author's notes, which are untrusted
+	// input carried into the prompt and the persisted state.
+	MaxBranchNotesBytes = 1 << 20
 )
 
 // Sentinel errors.
 var (
 	ErrInvalidRequest    = errors.New("invalid review request")
 	ErrThreadUnavailable = errors.New("stored Codex thread could not be resumed")
+	ErrStateInvalid      = errors.New("stored workflow state is incomplete")
 	ErrTimeout           = errors.New("review timed out")
 )
+
+// requestIDKey carries the request correlation id in a context.
+type requestIDKey struct{}
+
+// WithRequestID attaches a correlation id that appears in every outcome log
+// for the review.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey{}, id)
+}
+
+// RequestIDFrom returns the correlation id, or "-" when none was attached.
+func RequestIDFrom(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDKey{}).(string); ok && id != "" {
+		return id
+	}
+	return "-"
+}
 
 // Reviewer is the app-server session the service drives. The real
 // implementation is *appserver.Client; tests substitute a fake so the
@@ -98,13 +124,14 @@ func New(opts Options) *Service {
 }
 
 // DefaultReviewer starts codex app-server with the fixed reasoning effort.
-// The child is spawned on a context detached from the tool call so that a
-// cancelled call still gets an orderly interrupt and Close rather than an
-// immediate kill.
+// The handshake is bounded by StartupTimeout and by the caller's context;
+// the process lifetime is owned by the client's Close.
 func DefaultReviewer(version string, log *slog.Logger) func(ctx context.Context) (Reviewer, error) {
 	return func(ctx context.Context) (Reviewer, error) {
 		args := append(appserver.DefaultArgs(), "-c", fmt.Sprintf("model_reasoning_effort=%q", ReasoningEffort))
-		return appserver.Start(context.WithoutCancel(ctx), appserver.Options{
+		hctx, cancel := context.WithTimeout(ctx, StartupTimeout)
+		defer cancel()
+		return appserver.Start(hctx, appserver.Options{
 			Command: appserver.DefaultCommand,
 			Args:    args,
 			Version: version,
@@ -115,11 +142,30 @@ func DefaultReviewer(version string, log *slog.Logger) func(ctx context.Context)
 }
 
 // Review performs one review round, or replays an identical completed one.
+// Every outcome is logged once with the request id, terminal status, and
+// duration.
 func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
+	start := time.Now()
+	res, err := s.review(ctx, req)
+	switch {
+	case err != nil:
+		s.log.Warn("review finished", "request", RequestIDFrom(ctx), "status", "failed", "duration", time.Since(start), "error", err)
+	case res.Replayed:
+		s.log.Info("review finished", "request", RequestIDFrom(ctx), "status", "replayed", "round", res.Round, "duration", time.Since(start))
+	default:
+		s.log.Info("review finished", "request", RequestIDFrom(ctx), "status", "completed", "round", res.Round, "duration", time.Since(start), "warnings", len(res.Warnings))
+	}
+	return res, err
+}
+
+func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	if req.Repo == "" || req.Branch == "" || req.Commit == "" || req.BranchNotes == "" {
 		return nil, fmt.Errorf("%w: repo, branch, commit, and branch_notes are all required", ErrInvalidRequest)
 	}
-	start := time.Now()
+	if len(req.BranchNotes) > MaxBranchNotesBytes {
+		return nil, fmt.Errorf("%w: branch_notes is %d bytes, limit %d", ErrInvalidRequest, len(req.BranchNotes), MaxBranchNotesBytes)
+	}
+	requestID := RequestIDFrom(ctx)
 
 	lock, err := state.AcquireLock(ctx, s.store.LockPath(), state.LockWait)
 	if err != nil {
@@ -146,6 +192,14 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 	wf, known := st.Get(key)
+	if known {
+		// A stored workflow must be complete; an incomplete record could
+		// only come from corruption or a foreign writer, and starting a
+		// replacement thread would silently discard review context.
+		if wf.ThreadID == "" || wf.LastCommit == "" || wf.Round < 1 {
+			return nil, fmt.Errorf("%w: workflow %s in %s (thread %q, round %d, last commit %q)", ErrStateInvalid, key, s.store.Path(), wf.ThreadID, wf.Round, wf.LastCommit)
+		}
+	}
 
 	target, err := repo.ValidateTarget(ctx, req.Branch, req.Commit, wf.LastCommit)
 	if err != nil {
@@ -161,7 +215,7 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 	}
 	hash := ident.Hash()
 	if prev, ok := st.Replay(key, hash); ok {
-		s.log.Info("review replayed from state", "workflow", key, "round", prev.Round, "commit", target.Commit)
+		s.log.Info("review replayed from state", "request", requestID, "workflow", key, "round", prev.Round, "commit", target.Commit)
 		return &Result{
 			Repo: repo.Worktree, Branch: branch.Ref, Commit: target.Commit, Base: target.Base,
 			Round: prev.Round, Review: prev.LastReview, Warnings: prev.LastWarnings, Replayed: true,
@@ -182,7 +236,7 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 	defer reviewer.Close()
 
 	var thread appserver.Thread
-	if known && wf.ThreadID != "" {
+	if known {
 		thread, err = reviewer.ResumeThread(ctx, wf.ThreadID, repo.Worktree)
 		if err != nil {
 			return nil, fmt.Errorf("%w: workflow %s in %s: %w", ErrThreadUnavailable, key, s.store.Path(), err)
@@ -193,7 +247,7 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 			return nil, err
 		}
 	}
-	s.log.Info("review turn starting", "workflow", key, "round", round, "thread", abbreviate(thread.ID),
+	s.log.Info("review turn starting", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
 		"model", thread.Model, "effort", thread.ReasoningEffort, "commit", target.Commit, "base", target.Base)
 
 	turnCtx, cancel := context.WithTimeoutCause(ctx, s.timeout, ErrTimeout)
@@ -203,7 +257,7 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 		if errors.Is(context.Cause(turnCtx), ErrTimeout) {
 			err = fmt.Errorf("%w after %v: %w", ErrTimeout, s.timeout, err)
 		}
-		s.log.Warn("review turn failed", "workflow", key, "round", round, "duration", time.Since(start), "error", err)
+		s.log.Warn("review turn failed", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID), "error", err)
 		return nil, err
 	}
 
@@ -219,8 +273,8 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 	if err := s.store.Save(st); err != nil {
 		return nil, fmt.Errorf("review completed but state was not saved: %w", err)
 	}
-	s.log.Info("review turn completed", "workflow", key, "round", round, "thread", abbreviate(thread.ID),
-		"turn", rev.TurnID, "duration", time.Since(start), "warnings", len(rev.Warnings))
+	s.log.Info("review turn completed", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
+		"turn", rev.TurnID, "warnings", len(rev.Warnings))
 
 	return &Result{
 		Repo: repo.Worktree, Branch: branch.Ref, Commit: target.Commit, Base: target.Base,

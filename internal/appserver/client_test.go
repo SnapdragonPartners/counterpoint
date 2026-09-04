@@ -626,3 +626,18 @@ func TestWarningsAreBounded(t *testing.T) {
 		t.Errorf("second review: %v, %d warnings", err, len(rev2.Warnings))
 	}
 }
+
+func TestStalledInitializeIsCancellable(t *testing.T) {
+	t.Setenv(apptest.ScenarioEnv, "stall-init")
+	t.Setenv(apptest.StateEnv, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := Start(ctx, Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > closeGrace+3*time.Second {
+		t.Errorf("Start took %v to give up and reap the child", elapsed)
+	}
+}

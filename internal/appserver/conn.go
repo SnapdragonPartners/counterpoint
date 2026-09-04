@@ -85,9 +85,11 @@ type conn struct {
 	waitDone chan struct{}
 }
 
-// spawn starts the child process and its reader and writer goroutines.
-func spawn(ctx context.Context, command string, args []string, stderr io.Writer, log *slog.Logger) (*conn, error) {
-	cmd := exec.CommandContext(ctx, command, args...) //nolint:gosec // argument array from configuration; never a shell
+// spawn starts the child process and its reader and writer goroutines. The
+// process lifetime is owned by close and terminate, not by any context, so
+// a cancelled handshake or review can still unwind the child in order.
+func spawn(command string, args []string, stderr io.Writer, log *slog.Logger) (*conn, error) {
+	cmd := exec.Command(command, args...) //nolint:gosec // argument array from configuration; never a shell
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

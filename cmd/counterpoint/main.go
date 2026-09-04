@@ -61,5 +61,5 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	svc := review.New(review.Options{Store: state.NewStore(statePath), Logger: log, Version: version})
 	log.Info("counterpoint serving MCP on stdio", "version", version, "state", statePath)
-	return mcpserver.Serve(ctx, mcpserver.New(svc, version, log))
+	return mcpserver.Serve(ctx, mcpserver.New(ctx, svc, version, log), os.Stdin, os.Stdout)
 }

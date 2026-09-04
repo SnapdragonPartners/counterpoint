@@ -1,14 +1,21 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -65,7 +72,7 @@ func TestReviewToolOverInMemoryTransport(t *testing.T) {
 		NewReviewer: func(context.Context) (review.Reviewer, error) { return stubReviewer{}, nil },
 		Logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	})
-	server := New(svc, "test", slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	server := New(context.Background(), svc, "test", slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 
 	ctx := context.Background()
 	serverT, clientT := mcp.NewInMemoryTransports()
@@ -132,4 +139,134 @@ func cleanGitEnv() []string {
 		env = append(env, kv)
 	}
 	return append(env, "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+}
+
+// blockingReviewer holds the review until its context ends and records
+// whether Close ran.
+type blockingReviewer struct {
+	started chan struct{}
+	closed  chan struct{}
+}
+
+func (b *blockingReviewer) StartThread(context.Context, string) (appserver.Thread, error) {
+	return appserver.Thread{ID: "thr_1"}, nil
+}
+
+func (b *blockingReviewer) ResumeThread(_ context.Context, id, _ string) (appserver.Thread, error) {
+	return appserver.Thread{ID: id}, nil
+}
+
+func (b *blockingReviewer) Review(ctx context.Context, _, _ string) (*appserver.Review, error) {
+	close(b.started)
+	<-ctx.Done()
+	return nil, fmt.Errorf("%w: %w", appserver.ErrTurnInterrupted, ctx.Err())
+}
+
+func (b *blockingReviewer) Close() { close(b.closed) }
+
+func TestLifecycleCancellationInterruptsActiveReview(t *testing.T) {
+	dir := gitRepo(t)
+	rev := &blockingReviewer{started: make(chan struct{}), closed: make(chan struct{})}
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	svc := review.New(review.Options{
+		Store:       state.NewStore(filepath.Join(t.TempDir(), "state.json")),
+		NewReviewer: func(context.Context) (review.Reviewer, error) { return rev, nil },
+		Logger:      log,
+	})
+	lifecycle, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	server := New(lifecycle, svc, "test", log)
+
+	ctx := context.Background()
+	serverT, clientT := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: ToolName, Arguments: map[string]any{
+			"repo": dir, "branch": "feature", "commit": "HEAD", "branch_notes": "notes",
+		}})
+		if err != nil {
+			t.Errorf("CallTool: %v", err)
+		}
+		result <- res
+	}()
+
+	<-rev.started
+	shutdown() // SIGTERM equivalent
+	select {
+	case res := <-result:
+		if !res.IsError {
+			t.Fatal("review succeeded despite shutdown")
+		}
+		select {
+		case <-rev.closed:
+		default:
+			t.Error("reviewer not closed after shutdown")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("active review did not stop on lifecycle cancellation")
+	}
+
+	// The same request id appears on receipt and on the outcome log.
+	ids := regexp.MustCompile(`request=([0-9a-f]{12})`).FindAllStringSubmatch(logs.String(), -1)
+	if len(ids) < 2 || ids[0][1] != ids[len(ids)-1][1] {
+		t.Errorf("request id not propagated through logs:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "status=failed") {
+		t.Errorf("terminal status missing from logs:\n%s", logs.String())
+	}
+}
+
+func TestBoundedLineReader(t *testing.T) {
+	limit := 16
+	ok := strings.Repeat("a", limit) + "\n" + strings.Repeat("b", limit) + "\n"
+	r := newBoundedLineReader(io.NopCloser(strings.NewReader(ok)), limit)
+	if data, err := io.ReadAll(r); err != nil || string(data) != ok {
+		t.Fatalf("lines at the limit: %q, %v", data, err)
+	}
+
+	over := strings.Repeat("a", 4) + "\n" + strings.Repeat("c", limit+1) + "\n"
+	r = newBoundedLineReader(io.NopCloser(strings.NewReader(over)), limit)
+	_, err := io.ReadAll(r)
+	if !errors.Is(err, ErrRequestTooLarge) {
+		t.Fatalf("oversized line error = %v, want ErrRequestTooLarge", err)
+	}
+	if _, err := r.Read(make([]byte, 8)); !errors.Is(err, ErrRequestTooLarge) {
+		t.Errorf("reader recovered after an oversized line: %v", err)
+	}
+}
+
+func TestOversizedRequestEndsSession(t *testing.T) {
+	svc := review.New(review.Options{Store: state.NewStore(filepath.Join(t.TempDir(), "state.json")),
+		NewReviewer: func(context.Context) (review.Reviewer, error) { return stubReviewer{}, nil },
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil))})
+	server := New(context.Background(), svc, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Serve(context.Background(), server, inR, outW) }()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+
+	huge := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"review","arguments":{"branch_notes":"` + strings.Repeat("x", MaxRequestBytes+1) + `"}}}` + "\n"
+	go func() { _, _ = io.WriteString(inW, huge) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "size limit") {
+			t.Fatalf("Serve returned %v, want the size-limit error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("session did not end on an oversized request")
+	}
 }
