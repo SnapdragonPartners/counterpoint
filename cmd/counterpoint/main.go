@@ -30,7 +30,7 @@ func realMain() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -38,8 +38,9 @@ func realMain() int {
 }
 
 // run parses args and dispatches. Stdout is reserved for MCP protocol data;
-// only --version writes to it directly. All diagnostics go to stderr.
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+// --version writes to it directly and the server writes nothing else to it.
+// All diagnostics go to stderr.
+func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout io.Writer, stderr io.Writer) error {
 	fs := flag.NewFlagSet("counterpoint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	showVersion := fs.Bool("version", false, "print the version and exit")
@@ -61,5 +62,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	svc := review.New(review.Options{Store: state.NewStore(statePath), Logger: log, Version: version})
 	log.Info("counterpoint serving MCP on stdio", "version", version, "state", statePath)
-	return mcpserver.Serve(ctx, mcpserver.New(ctx, svc, version, log), os.Stdin, os.Stdout)
+	return mcpserver.Serve(ctx, mcpserver.New(ctx, svc, version, log), stdin, nopCloser{stdout})
 }
+
+// nopCloser adapts the injected stdout to the transport's WriteCloser
+// without closing the real stream on session end.
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }
