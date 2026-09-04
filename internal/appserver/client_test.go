@@ -12,15 +12,24 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/SnapdragonPartners/counterpoint/internal/appserver/apptest"
 )
+
+func TestMain(m *testing.M) {
+	if apptest.Main() {
+		return
+	}
+	os.Exit(m.Run())
+}
 
 // fakeClient starts a client against the fake app-server running the given
 // scenario. The child inherits the environment, so the scenario and state
 // path are set with t.Setenv.
 func fakeClient(t *testing.T, scenario string, statePath string) (*Client, *bytes.Buffer) {
 	t.Helper()
-	t.Setenv(fakeEnv, scenario)
-	t.Setenv(fakeStateEnv, statePath)
+	t.Setenv(apptest.ScenarioEnv, scenario)
+	t.Setenv(apptest.StateEnv, statePath)
 	var stderr syncBuffer
 	cl, err := Start(context.Background(), Options{
 		Command: os.Args[0],
@@ -302,8 +311,8 @@ func TestReviewOnUnexpectedThreadIsRejected(t *testing.T) {
 }
 
 func TestHandshakeFailureReapsChild(t *testing.T) {
-	t.Setenv(fakeEnv, "bad-init")
-	t.Setenv(fakeStateEnv, "")
+	t.Setenv(apptest.ScenarioEnv, "bad-init")
+	t.Setenv(apptest.StateEnv, "")
 	_, err := Start(context.Background(), Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
 	if err == nil || !strings.Contains(err.Error(), "initialize rejected") {
 		t.Fatalf("Start error = %v, want the app-server's rejection", err)
@@ -381,8 +390,8 @@ func TestWritesAreCancellableWhenChildStopsReading(t *testing.T) {
 }
 
 func TestIncompatibleInitializeIsRejected(t *testing.T) {
-	t.Setenv(fakeEnv, "bad-init-shape")
-	t.Setenv(fakeStateEnv, "")
+	t.Setenv(apptest.ScenarioEnv, "bad-init-shape")
+	t.Setenv(apptest.StateEnv, "")
 	_, err := Start(context.Background(), Options{Command: os.Args[0], Stderr: &bytes.Buffer{}})
 	if !errors.Is(err, ErrIncompatible) {
 		t.Fatalf("Start error = %v, want ErrIncompatible", err)

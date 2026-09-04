@@ -97,9 +97,13 @@ Successful output:
   "base": "9c1f0e4...merge-base object id...",
   "round": 8,
   "review": "Codex's completed review text",
-  "warnings": []
+  "warnings": [],
+  "replayed": false
 }
 ```
+
+`replayed` is true when an identical completed request was answered from
+state without a new Codex turn.
 
 `review` is text, not a machine-enforced verdict in the MVP. The authoring agent
 and human can understand explicit approval or findings without Counterpoint
@@ -331,6 +335,12 @@ without summarizing them away. The instructions direct Codex to:
 - cite precise files and lines when possible; and
 - return actionable findings ordered by severity, or explicit approval when no
   blocking findings remain.
+
+The instructions also tell Codex that it is running non-interactively in a
+read-only sandbox: it must not request additional permissions or user input,
+should use the best available read-only approach, complete the review
+autonomously, and report any material limitation in the review itself. This
+guidance lives in the prompt, not in the protocol-level declines.
 
 The instructions include the Counterpoint round number. Branch notes are
 delimited clearly as untrusted author input.

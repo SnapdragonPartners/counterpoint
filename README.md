@@ -15,8 +15,9 @@ and a reviewer without becoming a general-purpose orchestrator.
 
 ## Status
 
-Counterpoint is at the specification stage. The [MVP specification](docs/MVP.md)
-defines the first implementation.
+The MVP described in the [MVP specification](docs/MVP.md) is implemented and
+covered by automated tests against a fake app-server. Live acceptance against
+a real Codex CLI is a manual step recorded in the specification.
 
 ## Intended workflow
 
@@ -85,6 +86,26 @@ that value above twenty minutes if you have lowered it. The per-call wall-clock
 limit, `MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`,
 defaults to many hours and normally needs no change.
 
+## Installation and use
+
+Build the binary and register it with Claude Code as a stdio MCP server:
+
+```bash
+make build
+claude mcp add counterpoint -- "$PWD/bin/counterpoint"
+```
+
+Counterpoint exposes one tool, `review`, taking `repo`, `branch`, `commit`,
+and `branch_notes`. It returns the canonical repository path, the full branch
+ref, the reviewed commit and its merge base, the round number, Codex's review
+text, any bridge warnings, and whether the result was replayed from state.
+State lives under the user configuration directory in a `counterpoint`
+subdirectory; `COUNTERPOINT_STATE_FILE` overrides the path for tests and
+unusual installations. Diagnostics go to stderr only.
+
+Prerequisites at review time: a clean worktree checked out at the tip of a
+non-primary branch, and a locally authenticated Codex CLI.
+
 ## Development
 
 ```bash
@@ -93,9 +114,6 @@ make build     # bin/counterpoint
 make schema    # regenerate the codex app-server JSON schema into .schema/
 make install-hooks  # pre-commit hook that runs make check
 ```
-
-The MCP server is not implemented yet; the binary currently supports only
-`--version`.
 
 ## Name
 
