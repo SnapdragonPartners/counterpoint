@@ -115,7 +115,7 @@ Config overrides passed on the child command line, as
 - `sandbox_workspace_write.writable_roots = ["<workflow>/cache"]`
 - `sandbox_workspace_write.exclude_slash_tmp = true`
 - `sandbox_workspace_write.exclude_tmpdir_env_var = true`
-- `shell_environment_policy.set.TMPDIR = "<checkout>/.tmp"`
+- `shell_environment_policy.set.TMPDIR = "<checkout>/.counterpoint-tmp"`
 
 The effective `SandboxPolicy` reported by `thread/start` and `thread/resume`
 must be exactly: type `workspaceWrite`, `networkAccess` false,
