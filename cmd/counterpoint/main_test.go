@@ -51,6 +51,9 @@ func TestRunServesInjectedStreams(t *testing.T) {
 	t.Setenv("COUNTERPOINT_STATE_FILE", t.TempDir()+"/state.json")
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
+	// Closing every pipe end on exit releases the server and reader
+	// goroutines whichever branch fails.
+	defer func() { _ = inW.Close(); _ = inR.Close(); _ = outW.Close(); _ = outR.Close() }()
 	var stderr bytes.Buffer
 	done := make(chan error, 1)
 	go func() { done <- run(context.Background(), nil, inR, outW, &stderr) }()
@@ -75,8 +78,6 @@ func TestRunServesInjectedStreams(t *testing.T) {
 			t.Fatalf("initialize response did not reach the injected stdout: %q, %v", r.line, r.err)
 		}
 	case <-time.After(10 * time.Second):
-		_ = inW.Close()
-		_ = outR.Close()
 		t.Fatal("no initialize response on the injected stdout within 10s")
 	}
 	_ = inW.Close() // client disconnects; the server must exit

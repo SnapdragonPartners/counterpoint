@@ -468,7 +468,14 @@ func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
 	// Cancel only once the review is actually in progress, so the
 	// cancellation exercises the turn path rather than setup.
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { <-probe.reviewStarted; cancel() }()
+	defer cancel()
+	go func() {
+		select {
+		case <-probe.reviewStarted:
+			cancel()
+		case <-ctx.Done(): // the test ended first; nothing to wait for
+		}
+	}()
 	_, err := h.svc.Review(ctx, h.request(tip, "r1"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
