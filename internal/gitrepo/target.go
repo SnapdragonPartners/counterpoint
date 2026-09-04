@@ -44,7 +44,7 @@ func (r *Repository) ResolveCommit(ctx context.Context, commitish string) (strin
 	}
 	oid, err := r.git(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", commitish+"^{commit}")
 	if err != nil {
-		if exitCode(err) >= 0 {
+		if isNotFound(err) {
 			return "", fmt.Errorf("%w: %q", ErrCommitNotFound, commitish)
 		}
 		return "", err
@@ -121,23 +121,33 @@ func (r *Repository) ValidateTarget(ctx context.Context, branchName, commitish, 
 // requireClean fails when the worktree has staged changes, unstaged changes
 // to tracked files, or untracked files. Ignored files do not count.
 func (r *Repository) requireClean(ctx context.Context) error {
-	out, err := r.git(ctx, "status", "--porcelain", "--untracked-files=normal")
+	return r.requireCleanBounded(ctx, maxStdout)
+}
+
+// requireCleanBounded is requireClean with an explicit capture limit. Status
+// output only has to be empty or not, so output beyond the limit still
+// proves the worktree is dirty and is reported as such rather than failing.
+func (r *Repository) requireCleanBounded(ctx context.Context, limit int) error {
+	out, truncated, err := runBounded(ctx, r.Worktree, limit, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return err
 	}
-	if out == "" {
+	if out == "" && !truncated {
 		return nil
 	}
 	lines := strings.Split(out, "\n")
-	summary := strings.Join(lines, "; ")
-	return fmt.Errorf("%w: %d entries: %s", ErrDirtyWorktree, len(lines), truncate(summary))
+	summary := truncate(strings.Join(lines, "; "))
+	if truncated {
+		return fmt.Errorf("%w: more than %d entries (output truncated): %s", ErrDirtyWorktree, len(lines), summary)
+	}
+	return fmt.Errorf("%w: %d entries: %s", ErrDirtyWorktree, len(lines), summary)
 }
 
 // mergeBase returns the merge base of ref and commit.
 func (r *Repository) mergeBase(ctx context.Context, ref, commit string) (string, error) {
 	out, err := r.git(ctx, "merge-base", "--", ref, commit)
 	if err != nil {
-		if exitCode(err) == 1 {
+		if isNotFound(err) {
 			return "", fmt.Errorf("%w: %s and %s share no history", ErrNoMergeBase, ref, commit)
 		}
 		return "", err
@@ -162,7 +172,7 @@ func (r *Repository) historyRewritten(ctx context.Context, previousTip, commit s
 	switch {
 	case err == nil:
 		return false, nil
-	case exitCode(err) == 1:
+	case isNotFound(err):
 		return true, nil
 	default:
 		return false, err

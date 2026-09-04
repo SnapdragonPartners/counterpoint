@@ -38,7 +38,7 @@ func Open(ctx context.Context, path string) (*Repository, error) {
 
 	out, err := run(ctx, resolved, "rev-parse", "--show-toplevel", "--git-common-dir")
 	if err != nil {
-		if exitCode(err) >= 0 {
+		if isNotWorktree(err) {
 			return nil, fmt.Errorf("%w: %q: %w", ErrNotRepository, path, err)
 		}
 		return nil, err
@@ -82,4 +82,22 @@ func WorkflowKey(identity, ref string) string {
 // git runs a Git command inside the worktree.
 func (r *Repository) git(ctx context.Context, args ...string) (string, error) {
 	return run(ctx, r.Worktree, args...)
+}
+
+// notWorktreeMessages are the diagnostics Git prints, with the locale pinned
+// to C, when a path is outside any repository or inside a bare one. Any
+// other failure with the same exit status is an operational error.
+var notWorktreeMessages = [...]string{ //nolint:gochecknoglobals // constant table
+	"not a git repository",
+	"must be run in a work tree",
+}
+
+func isNotWorktree(err error) bool {
+	stderr := stderrOf(err)
+	for _, msg := range notWorktreeMessages {
+		if strings.Contains(stderr, msg) {
+			return true
+		}
+	}
+	return false
 }

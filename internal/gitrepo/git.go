@@ -9,7 +9,6 @@
 package gitrepo
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,9 +16,24 @@ import (
 	"strings"
 )
 
-// maxErrorOutput bounds how much of Git's stderr is included in an error so
-// a pathological repository cannot produce an unbounded message.
-const maxErrorOutput = 512
+const (
+	// maxStdout bounds captured standard output while Git runs. Every
+	// command this package issues produces a few lines at most, except
+	// status in a badly dirty worktree, which handles overflow itself.
+	maxStdout = 1 << 20
+	// maxStderr bounds captured diagnostics while Git runs.
+	maxStderr = 64 << 10
+	// maxErrorOutput bounds how much stderr is quoted in an error message.
+	maxErrorOutput = 512
+	// exitNotFound is Git's exit status for a ref or object that does not
+	// exist under --verify --quiet, for a missing symbolic ref, and for
+	// "false" answers such as merge-base --is-ancestor.
+	exitNotFound = 1
+)
+
+// ErrOutputTooLarge reports that a Git command produced more standard output
+// than this package is prepared to hold.
+var ErrOutputTooLarge = errors.New("git output exceeded the size limit")
 
 // gitEnvBlocklist names environment variables that would redirect Git away
 // from the directory passed with -C. They are removed so the supplied
@@ -34,9 +48,33 @@ var gitEnvBlocklist = [...]string{ //nolint:gochecknoglobals // constant table
 	"GIT_NAMESPACE=",
 }
 
-// exitError is returned by run when Git exits non-zero. Callers that treat a
-// specific exit code as a result (for example merge-base --is-ancestor) can
-// inspect it with errors.As.
+// boundedBuffer retains at most limit bytes and records whether more were
+// offered. It never fails a write, so the child process keeps draining
+// instead of blocking on a full pipe.
+type boundedBuffer struct {
+	buf      strings.Builder
+	limit    int
+	overflow bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	room := b.limit - b.buf.Len()
+	switch {
+	case room <= 0:
+		b.overflow = true
+	case len(p) > room:
+		b.buf.Write(p[:room])
+		b.overflow = true
+	default:
+		b.buf.Write(p)
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string { return b.buf.String() }
+
+// exitError is returned when Git exits non-zero. Callers that treat a
+// specific exit status as a result inspect it with exitCode.
 type exitError struct {
 	args   []string
 	code   int
@@ -52,24 +90,50 @@ func (e *exitError) Error() string {
 }
 
 // run executes git with the given argument array in dir and returns trimmed
-// stdout. It never composes a shell command.
+// stdout. Output beyond maxStdout is an error, since every caller of run
+// needs the complete result.
 func run(ctx context.Context, dir string, args ...string) (string, error) {
+	return runWithLimit(ctx, dir, maxStdout, args...)
+}
+
+// runWithLimit is run with an explicit stdout limit; exceeding it is
+// ErrOutputTooLarge.
+func runWithLimit(ctx context.Context, dir string, stdoutLimit int, args ...string) (string, error) {
+	out, truncated, err := runBounded(ctx, dir, stdoutLimit, args...)
+	if err != nil {
+		return "", err
+	}
+	if truncated {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), ErrOutputTooLarge)
+	}
+	return out, nil
+}
+
+// runBounded executes git and captures at most stdoutLimit bytes of standard
+// output, reporting whether more was discarded. It never composes a shell
+// command. A failure caused by context cancellation wraps the context error
+// so callers can match it with errors.Is.
+func runBounded(ctx context.Context, dir string, stdoutLimit int, args ...string) (out string, truncated bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // argument array; inputs never reach a shell
 	cmd.Dir = dir
 	cmd.Env = cleanEnv(cmd.Environ())
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &boundedBuffer{limit: stdoutLimit}
+	stderr := &boundedBuffer{limit: maxStderr}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", false, fmt.Errorf("git %s: %w", strings.Join(args, " "), ctxErr)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return "", &exitError{args: args, code: ee.ExitCode(), stderr: truncate(stderr.String())}
+			return "", false, &exitError{args: args, code: ee.ExitCode(), stderr: truncate(stderr.String())}
 		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", false, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
-	return strings.TrimRight(stdout.String(), "\n"), nil
+	return strings.TrimRight(stdout.String(), "\n"), stdout.overflow, nil
 }
 
 // cleanEnv drops blocklisted Git variables and pins prompts and locale so
@@ -103,11 +167,27 @@ func truncate(s string) string {
 }
 
 // exitCode returns Git's exit status when err is an exitError, and -1
-// otherwise.
+// otherwise, including for cancellation and process-launch failures.
 func exitCode(err error) int {
 	var ee *exitError
 	if errors.As(err, &ee) {
 		return ee.code
 	}
 	return -1
+}
+
+// isNotFound reports whether err is Git's documented "does not exist" or
+// "false" exit status. Every other failure is operational and must be
+// surfaced rather than treated as absence.
+func isNotFound(err error) bool {
+	return exitCode(err) == exitNotFound
+}
+
+// stderrOf returns the captured diagnostics when err is an exitError.
+func stderrOf(err error) string {
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.stderr
+	}
+	return ""
 }

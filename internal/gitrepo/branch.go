@@ -72,7 +72,7 @@ func (r *Repository) ResolveBranch(ctx context.Context, name string) (*Branch, e
 	// check-ref-format does not accept a "--" separator. The argument always
 	// starts with refs/heads/, so it can never be parsed as an option.
 	if _, err := r.git(ctx, "check-ref-format", ref); err != nil {
-		if exitCode(err) == 1 {
+		if isNotFound(err) {
 			return nil, fmt.Errorf("%w: %q", ErrInvalidBranch, name)
 		}
 		return nil, err
@@ -80,10 +80,14 @@ func (r *Repository) ResolveBranch(ctx context.Context, name string) (*Branch, e
 
 	tip, err := r.git(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
 	if err != nil {
-		if exitCode(err) < 0 {
+		if !isNotFound(err) {
 			return nil, err
 		}
-		if r.refExists(ctx, remotesPrefix+short) {
+		remote, err := r.refExists(ctx, remotesPrefix+short)
+		if err != nil {
+			return nil, err
+		}
+		if remote {
 			return nil, fmt.Errorf("%w: %q is a remote-tracking branch, not a local branch", ErrBranchNotFound, name)
 		}
 		return nil, fmt.Errorf("%w: %q", ErrBranchNotFound, name)
@@ -94,10 +98,19 @@ func (r *Repository) ResolveBranch(ctx context.Context, name string) (*Branch, e
 	return &Branch{Name: short, Ref: ref, Tip: tip}, nil
 }
 
-// refExists reports whether a fully qualified ref resolves.
-func (r *Repository) refExists(ctx context.Context, ref string) bool {
+// refExists reports whether a fully qualified ref resolves. Only Git's
+// not-found status means absence; cancellation and repository failures are
+// returned as errors.
+func (r *Repository) refExists(ctx context.Context, ref string) (bool, error) {
 	_, err := r.git(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", ref)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case isNotFound(err):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // PrimaryBranch determines the repository's primary branch name and the ref
@@ -132,7 +145,7 @@ func (r *Repository) PrimaryBranch(ctx context.Context) (name, ref string, err e
 func (r *Repository) remoteHeadName(ctx context.Context) (string, error) {
 	out, err := r.git(ctx, "symbolic-ref", "--quiet", "--", remotesPrefix+defaultRemote+"/HEAD")
 	if err != nil {
-		if exitCode(err) >= 0 {
+		if isNotFound(err) {
 			return "", nil
 		}
 		return "", err
@@ -147,11 +160,14 @@ func (r *Repository) remoteHeadName(ctx context.Context) (string, error) {
 // primaryRef returns the local ref for name when it exists, otherwise the
 // origin remote-tracking ref, otherwise ErrNoPrimaryBranch.
 func (r *Repository) primaryRef(ctx context.Context, name string) (string, error) {
-	if local := headsPrefix + name; r.refExists(ctx, local) {
-		return local, nil
-	}
-	if remote := remotesPrefix + defaultRemote + "/" + name; r.refExists(ctx, remote) {
-		return remote, nil
+	for _, ref := range []string{headsPrefix + name, remotesPrefix + defaultRemote + "/" + name} {
+		exists, err := r.refExists(ctx, ref)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return ref, nil
+		}
 	}
 	return "", fmt.Errorf("%w: %q exists neither locally nor on origin", ErrNoPrimaryBranch, name)
 }
