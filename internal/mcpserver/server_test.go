@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -14,8 +15,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 

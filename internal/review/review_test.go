@@ -29,6 +29,9 @@ type fakeReviewer struct {
 	resumeErr     error
 	reviewErr     error
 	blockUntilCtx bool
+	// reviewStarted is closed the first time Review is called.
+	reviewStarted chan struct{}
+	startOnce     sync.Once
 	stallSetup    bool // StartThread and ResumeThread block until ctx ends
 	warnings      []string
 }
@@ -59,6 +62,11 @@ func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appser
 }
 
 func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string) (*appserver.Review, error) {
+	f.startOnce.Do(func() {
+		if f.reviewStarted != nil {
+			close(f.reviewStarted)
+		}
+	})
 	f.mu.Lock()
 	f.instructions = append(f.instructions, instructions)
 	block, err, warnings := f.blockUntilCtx, f.reviewErr, f.warnings
@@ -453,11 +461,21 @@ func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
 	h := newHarness(t)
 	probe := &lockProbeReviewer{lockPath: h.store.LockPath()}
 	probe.blockUntilCtx = true
+	probe.reviewStarted = make(chan struct{})
 	h.svc.newReviewer = func(context.Context) (Reviewer, error) { return probe, nil }
 	tip := h.repo.git("rev-parse", "HEAD")
 
+	// Cancel only once the review is actually in progress, so the
+	// cancellation exercises the turn path rather than setup.
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	defer cancel()
+	go func() {
+		select {
+		case <-probe.reviewStarted:
+			cancel()
+		case <-ctx.Done(): // the test ended first; nothing to wait for
+		}
+	}()
 	_, err := h.svc.Review(ctx, h.request(tip, "r1"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
