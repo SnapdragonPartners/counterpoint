@@ -167,6 +167,9 @@ func (st *Store) Save(s *State) error {
 	if !st.loaded {
 		return fmt.Errorf("%w: %s", ErrNotLoaded, st.path)
 	}
+	if s == nil {
+		return fmt.Errorf("save state %s: nil state", st.path)
+	}
 	env := envelope{Version: Version, Workflows: s.Workflows}
 	if env.Workflows == nil {
 		env.Workflows = map[string]Workflow{}
@@ -176,6 +179,11 @@ func (st *Store) Save(s *State) error {
 		return fmt.Errorf("encode state: %w", err)
 	}
 	data = append(data, '\n')
+	// Enforce the same bound Load applies, so a save can never produce a
+	// file that the next Load would reject. The previous state stays intact.
+	if int64(len(data)) > MaxStateFileSize {
+		return fmt.Errorf("%w: encoded state is %d bytes, limit %d: %s", ErrTooLarge, len(data), MaxStateFileSize, st.path)
+	}
 
 	dir := filepath.Dir(st.path)
 	if err := os.MkdirAll(dir, dirPerm); err != nil {

@@ -228,6 +228,45 @@ func TestExactlyMaxSizeIsAccepted(t *testing.T) {
 	}
 }
 
+func TestSaveRefusesOversizedStateAndKeepsPrevious(t *testing.T) {
+	st := tempStore(t)
+	s, _ := st.Load()
+	s.Put("k", Workflow{Round: 1})
+	if err := st.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(st.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.Put("k", Workflow{Round: 2, LastReview: strings.Repeat("x", MaxStateFileSize)})
+	err = st.Save(s)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Save oversized error = %v, want ErrTooLarge", err)
+	}
+	after, err := os.ReadFile(st.Path())
+	if err != nil || string(after) != string(before) {
+		t.Errorf("previous state not preserved after refused save: %v", err)
+	}
+	if _, err := NewStore(st.Path()).Load(); err != nil {
+		t.Errorf("state unreadable after refused save: %v", err)
+	}
+}
+
+func TestSaveRejectsNilState(t *testing.T) {
+	st := tempStore(t)
+	if _, err := st.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(nil); err == nil {
+		t.Fatal("Save(nil) = nil error, want error")
+	}
+	if _, err := os.Stat(st.Path()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("state file created by refused save: %v", err)
+	}
+}
+
 func TestSaveWithoutLoadIsRefused(t *testing.T) {
 	st := tempStore(t)
 	if err := st.Save(&State{}); !errors.Is(err, ErrNotLoaded) {
