@@ -339,6 +339,18 @@ func (f *fakeServer) handleReviewStart(env *envelope) {
 		f.notify("turn/started", map[string]any{"threadId": threadID, "turn": turn})
 		f.notify("item/agentMessage/delta", map[string]any{"threadId": threadID, "turnId": turnID, "itemId": "m1", "delta": "early "})
 	}
+	switch f.scenario {
+	case "stale-events":
+		// Events that must not be attributed to the review: a completion
+		// for another turn on the same thread before the real turn starts,
+		// and an item with no turn id at all.
+		f.notify("turn/completed", map[string]any{"threadId": threadID, "turn": map[string]any{"id": "turn_stale", "status": "completed",
+			"items": []any{map[string]any{"id": "s", "type": "exitedReviewMode", "review": "STALE"}}}})
+		f.notify("item/completed", map[string]any{"threadId": threadID, "turnId": "", "completedAtMs": 1,
+			"item": map[string]any{"id": "e", "type": "exitedReviewMode", "review": "EMPTY ID"}})
+	case "started-id-disagrees":
+		f.notify("turn/started", map[string]any{"threadId": threadID, "turn": map[string]any{"id": "turn_early", "status": "inProgress", "items": []any{}}})
+	}
 	if f.scenario == "started-then-stall" {
 		// The turn is running before the response exists. Hold the
 		// response until the client interrupts the turn it learned about
@@ -432,6 +444,16 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 		for i := 0; i < 17; i++ {
 			message(chunk)
 		}
+		complete("completed", nil)
+	case "warning-flood":
+		// Far more requests than the warning bound, each with a huge id.
+		// Replies are consumed by the read loop and ignored.
+		hugeID := strings.Repeat("x", 4096)
+		for i := 0; i < 10*maxWarnings; i++ {
+			f.send(map[string]any{"id": fmt.Sprintf("wf-%d", i), "method": "item/commandExecution/requestApproval",
+				"params": map[string]any{"threadId": threadID, "turnId": turnID, "itemId": hugeID, "startedAtMs": 1}})
+		}
+		reviewItem(reviewText)
 		complete("completed", nil)
 	case "approval":
 		if msg := f.runApprovals(threadID, turnID); msg != "" {

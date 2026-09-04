@@ -209,7 +209,9 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 	if resp.ReviewThreadID != threadID {
 		return nil, fmt.Errorf("%w: review/start ran on thread %q, expected the persistent thread %q", ErrPolicyMismatch, resp.ReviewThreadID, threadID)
 	}
-	w.setTurn(resp.Turn.ID)
+	if !w.setTurn(resp.Turn.ID) {
+		return nil, fmt.Errorf("%w: turn/started reported turn %q but review/start returned %q", ErrIncompatible, w.knownTurn(), resp.Turn.ID)
+	}
 
 	switch awaitTurn(w.done, cl.c.closed, ctx.Done()) {
 	case turnFinished:
@@ -324,19 +326,24 @@ func (w *turnWatcher) knownTurn() string {
 	return w.turnID
 }
 
-func (w *turnWatcher) setTurn(id string) {
+// setTurn records the turn id from the review/start response. It reports
+// false when an earlier turn/started established a different id.
+func (w *turnWatcher) setTurn(id string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.turnID == "" {
 		w.turnID = id
+		return true
 	}
+	return w.turnID == id
 }
 
-// matches reports whether an event belongs to this watcher's turn. Before
-// the turn id is known, every event on the thread counts, since only one
-// turn runs on a thread at a time.
+// matches reports whether an event belongs to this watcher's turn. It is
+// fail-closed: the turn id must already be established and the event must
+// carry the same nonempty thread and turn ids. Events that arrive before
+// turn/started, or with a missing id, are ignored rather than attributed.
 func (w *turnWatcher) matches(threadID, turnID string) bool {
-	return threadID == w.threadID && (w.turnID == "" || turnID == "" || turnID == w.turnID)
+	return w.turnID != "" && threadID == w.threadID && turnID != "" && turnID == w.turnID
 }
 
 func (w *turnWatcher) handle(method string, params json.RawMessage) {
@@ -348,7 +355,7 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 	switch method {
 	case notifyTurnStarted:
 		var n turnNotification
-		if unmarshal(params, &n) && n.ThreadID == w.threadID && w.turnID == "" {
+		if unmarshal(params, &n) && n.ThreadID == w.threadID && w.turnID == "" && n.Turn.ID != "" {
 			w.turnID = n.Turn.ID
 		}
 	case notifyAgentMessageDelta:

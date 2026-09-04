@@ -566,3 +566,54 @@ func TestPendingCallReportsTypedTransportError(t *testing.T) {
 		t.Fatal("pending call did not return after termination")
 	}
 }
+
+func TestStaleAndUnidentifiedEventsAreNotAttributed(t *testing.T) {
+	cl, _ := fakeClient(t, "stale-events", "")
+	th := startThread(t, cl)
+	rev, err := cl.Review(context.Background(), th.ID, "x")
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if !strings.HasPrefix(rev.Text, "REVIEW for ") || strings.Contains(rev.Text, "STALE") || strings.Contains(rev.Text, "EMPTY ID") {
+		t.Errorf("Text = %q, want the real review only", rev.Text)
+	}
+}
+
+func TestEarlyTurnIDDisagreementIsAnError(t *testing.T) {
+	cl, _ := fakeClient(t, "started-id-disagrees", "")
+	th := startThread(t, cl)
+	_, err := cl.Review(context.Background(), th.ID, "x")
+	if !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("Review error = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestWarningsAreBounded(t *testing.T) {
+	cl, _ := fakeClient(t, "warning-flood", "")
+	th := startThread(t, cl)
+	rev, err := cl.Review(context.Background(), th.ID, "x")
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if len(rev.Warnings) == 0 || len(rev.Warnings) > maxWarnings+1 {
+		t.Fatalf("got %d warnings, want at most %d plus one marker", len(rev.Warnings), maxWarnings)
+	}
+	total := 0
+	for _, w := range rev.Warnings[:len(rev.Warnings)-1] {
+		total += len(w)
+		if len(w) > 2*maxIdentifierLen+128 {
+			t.Errorf("warning not truncated: %d bytes", len(w))
+		}
+	}
+	if total > maxWarningBytes {
+		t.Errorf("warnings total %d bytes, want at most %d", total, maxWarningBytes)
+	}
+	last := rev.Warnings[len(rev.Warnings)-1]
+	if !strings.Contains(last, "additional app-server warnings omitted") {
+		t.Errorf("last warning %q is not the omission marker", last)
+	}
+	// The bound resets between reviews.
+	if rev2, err := cl.Review(context.Background(), th.ID, "y"); err != nil || len(rev2.Warnings) > maxWarnings+1 {
+		t.Errorf("second review: %v, %d warnings", err, len(rev2.Warnings))
+	}
+}

@@ -29,6 +29,13 @@ const (
 	// that stops reading stdin fills the queue; callers then fail through
 	// their contexts instead of blocking on the pipe.
 	outboxSize = 64
+
+	// Warnings derive from untrusted child messages and are returned to
+	// the caller and persisted, so the collection is bounded by count and
+	// bytes, and each identifier quoted in one is truncated.
+	maxWarnings      = 32
+	maxWarningBytes  = 8 << 10
+	maxIdentifierLen = 64
 )
 
 // Sentinel errors for the transport.
@@ -64,7 +71,11 @@ type conn struct {
 	handlers map[int64]notificationHandler
 	nextHnd  int64
 	warnings []string
-	exitErr  error
+	// warningBytes is the total size of warnings; warningsOmitted counts
+	// warnings dropped once a bound was reached.
+	warningBytes    int
+	warningsOmitted int
+	exitErr         error
 
 	// closed is closed when the reader has drained stdout to EOF and every
 	// pending call has been failed. The process is reaped only after that,
@@ -410,14 +421,15 @@ func (c *conn) handleServerRequest(env *envelope) {
 	c.sendFromReader(map[string]any{"id": env.ID, "result": result})
 }
 
-// identifiers formats the request's item and turn ids for a warning.
+// identifiers formats the request's item and turn ids for a warning,
+// truncating each so an enormous identifier cannot inflate the warning.
 func identifiers(p serverRequestParams) string {
 	var parts []string
 	if p.ItemID != "" {
-		parts = append(parts, "item "+p.ItemID)
+		parts = append(parts, "item "+truncateIdentifier(p.ItemID))
 	}
 	if p.TurnID != "" {
-		parts = append(parts, "turn "+p.TurnID)
+		parts = append(parts, "turn "+truncateIdentifier(p.TurnID))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -425,19 +437,40 @@ func identifiers(p serverRequestParams) string {
 	return " (" + strings.Join(parts, ", ") + ")"
 }
 
+func truncateIdentifier(id string) string {
+	if len(id) > maxIdentifierLen {
+		return id[:maxIdentifierLen] + "..."
+	}
+	return id
+}
+
+// addWarning records a warning unless the count or byte bound is reached,
+// in which case it is counted as omitted. The log line is emitted either
+// way, since logs are bounded by the operator, not by this process.
 func (c *conn) addWarning(w string) {
 	c.log.Warn("app-server: " + w)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.warnings) >= maxWarnings || c.warningBytes+len(w) > maxWarningBytes {
+		c.warningsOmitted++
+		return
+	}
 	c.warnings = append(c.warnings, w)
-	c.mu.Unlock()
+	c.warningBytes += len(w)
 }
 
-// takeWarnings returns and clears accumulated warnings.
+// takeWarnings returns and clears accumulated warnings, appending one
+// marker when warnings were omitted because a bound was reached.
 func (c *conn) takeWarnings() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w := c.warnings
+	if c.warningsOmitted > 0 {
+		w = append(w, fmt.Sprintf("%d additional app-server warnings omitted (bounded at %d entries or %d bytes)", c.warningsOmitted, maxWarnings, maxWarningBytes))
+	}
 	c.warnings = nil
+	c.warningBytes = 0
+	c.warningsOmitted = 0
 	return w
 }
 
