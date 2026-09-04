@@ -246,9 +246,10 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	if known {
 		thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
 		if err != nil {
-			// Only a rejection by the app-server means the stored thread is
-			// unavailable; cancellation and the setup deadline are
-			// transient and must not suggest clearing the association.
+			// Cancellation and the setup deadline are transient and must
+			// not suggest clearing the stored association. Any other resume
+			// failure, including a transport failure, is reported as the
+			// thread being unavailable, since the caller cannot tell more.
 			if setupCtx.Err() != nil {
 				return nil, setupError(setupCtx, err)
 			}

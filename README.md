@@ -78,25 +78,34 @@ reviewers, remote execution, push/PR automation, and a general workflow engine.
 
 ## Timeouts
 
-A review call is bounded by two fixed Counterpoint timeouts: sixty seconds for
-setup, which covers starting `codex app-server`, its handshake, and starting or
-resuming the thread, and then twenty minutes for the review turn itself. A call
-can therefore take up to twenty-one minutes. Claude Code separately aborts a
-stdio MCP tool call that has produced no response for thirty minutes by
-default, controlled by the `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment
-variable in milliseconds. Keep that value above twenty-one minutes if you have
-lowered it. The per-call wall-clock limit, `MCP_TOOL_TIMEOUT` or the per-server
-`timeout` field in `.mcp.json`, defaults to many hours and normally needs no
-change.
+Counterpoint applies two fixed phase budgets inside a review call: sixty
+seconds for setup, which covers starting `codex app-server`, its handshake, and
+starting or resuming the thread, and then twenty minutes for the review turn
+itself. These are not a bound on the whole call. Lock acquisition waits up to
+two seconds, Git validation and state persistence have no Counterpoint
+deadline, and cleanup after a failure or cancellation can add up to five
+seconds waiting for the turn to interrupt and five more waiting for the child
+to exit before it is killed. A call that hits every budget can exceed
+twenty-one minutes by that cleanup time plus however long Git takes.
+
+Claude Code separately aborts a stdio MCP tool call that has produced no
+response for thirty minutes by default, controlled by the
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. Keep
+that default; it leaves adequate margin over the phase budgets. Do not lower it
+to anything near twenty-one minutes. The per-call wall-clock limit,
+`MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`, defaults
+to many hours and normally needs no change.
 
 ## Limits
 
-- `branch_notes` may be at most 1 MiB; longer notes are rejected before any
-  work starts.
-- One MCP request line may be at most 6 MiB on the wire, enough for maximal
-  notes after JSON escaping; a longer or multi-line request ends the session.
-- Bridge warnings returned with a review are capped at 32 entries and 8 KiB,
-  with a final entry reporting how many were omitted.
+- `branch_notes` may be at most 1 MiB (1,048,576 bytes) decoded; longer notes
+  are rejected before any work starts.
+- One MCP request line may be at most 6 MiB plus 64 KiB (6,356,992 bytes) on
+  the wire, which fits maximal notes after JSON escaping plus framing. A longer
+  line, or a request spread over several lines, ends the session.
+- Bridge warnings returned with a review are capped at 32 entries totalling at
+  most 8 KiB (8,192 bytes). When any are omitted, one additional final entry
+  reports the omitted count; that marker is not counted against either cap.
 
 ## Installation and use
 
