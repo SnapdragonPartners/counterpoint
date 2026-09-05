@@ -22,6 +22,11 @@ Issues rather than here:
   designed in `docs/design/disposable-checkout.md`. Retention of its build
   cache is
   [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
+- [Issue 19](https://github.com/SnapdragonPartners/counterpoint/issues/19):
+  Codex's review mode starts each round from a fresh history, so the
+  reviewer never saw its earlier verdicts. Open; the accepted design is
+  `docs/design/review-ledger.md`, and this document's claims about
+  cross-round context are corrected by that change.
 
 Items under "Explicitly deferred" stay deferred until an accepted design or
 issue adds them.
