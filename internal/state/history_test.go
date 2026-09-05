@@ -128,9 +128,18 @@ func TestRetainHistoryBounds(t *testing.T) {
 		t.Errorf("placeholder newest review should not evict: %+v", h)
 	}
 
-	// Empty history stays nil so the field is omitted from the file.
-	if h := RetainHistory(nil, rec(1, ""), ""); h != nil && len(h) != 1 {
-		t.Errorf("history = %+v", h)
+	// When nothing can be kept, the result is nil rather than an empty
+	// slice, so the field is omitted from the file. Retention builds
+	// placeholders through NewHistoryRecord, so this only arises for a raw
+	// record that, together with the newest review, breaks the aggregate
+	// bound on its own; the sizes are derived from the bounds so the case
+	// survives a change to either constant.
+	raw := strings.Repeat("r", MaxHistoryBytes-len(exact)+1)
+	if len(raw) <= MaxHistoryRecordBytes {
+		t.Fatalf("raw record of %d bytes would be a placeholder, not a bound breaker", len(raw))
+	}
+	if h := RetainHistory(nil, rec(1, raw), exact); h != nil {
+		t.Errorf("history = %+v, want nil", h)
 	}
 }
 
