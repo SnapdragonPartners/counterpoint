@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/SnapdragonPartners/counterpoint/internal/appserver"
 	"github.com/SnapdragonPartners/counterpoint/internal/gitrepo"
+	"github.com/SnapdragonPartners/counterpoint/internal/scratch"
 	"github.com/SnapdragonPartners/counterpoint/internal/state"
 )
 
@@ -37,6 +39,12 @@ type fakeReviewer struct {
 	omitEffort    bool // ResumeThread reports no reasoning effort, as codex-cli 0.153.1 does
 	warnings      []string
 
+	sandboxes   []appserver.Sandbox // one per StartThread or ResumeThread
+	currentCwd  string
+	extraArgs   [][]string       // per NewReviewer call
+	duringSetup func(cwd string) // observes the thread cwd while it exists
+	duringTurn  func(cwd string) // runs inside Review, e.g. to modify the checkout
+
 	unarchived     []string
 	unarchiveErr   error              // nil: unarchive succeeds and the thread resumes afterwards
 	cancelOnResume context.CancelFunc // called before a scripted resume failure is returned
@@ -44,7 +52,7 @@ type fakeReviewer struct {
 	nameErr        error
 }
 
-func (f *fakeReviewer) StartThread(ctx context.Context, cwd string) (appserver.Thread, error) {
+func (f *fakeReviewer) StartThread(ctx context.Context, cwd string, sb appserver.Sandbox) (appserver.Thread, error) {
 	if f.stallSetup {
 		<-ctx.Done()
 		return appserver.Thread{}, ctx.Err()
@@ -52,10 +60,15 @@ func (f *fakeReviewer) StartThread(ctx context.Context, cwd string) (appserver.T
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.started = append(f.started, cwd)
+	f.sandboxes = append(f.sandboxes, sb)
+	f.currentCwd = cwd
+	if f.duringSetup != nil {
+		f.duringSetup(cwd)
+	}
 	return appserver.Thread{ID: fmt.Sprintf("thr_%d", len(f.started)), Model: "fake", ReasoningEffort: "xhigh"}, nil
 }
 
-func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appserver.Thread, error) {
+func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string, sb appserver.Sandbox) (appserver.Thread, error) {
 	if f.stallSetup {
 		<-ctx.Done()
 		return appserver.Thread{}, ctx.Err()
@@ -70,6 +83,11 @@ func (f *fakeReviewer) ResumeThread(ctx context.Context, id, cwd string) (appser
 		return appserver.Thread{}, f.resumeErr
 	}
 	f.resumed = append(f.resumed, id+"@"+cwd)
+	f.sandboxes = append(f.sandboxes, sb)
+	f.currentCwd = cwd
+	if f.duringSetup != nil {
+		f.duringSetup(cwd)
+	}
 	th := appserver.Thread{ID: id, Model: "fake", ReasoningEffort: "xhigh"}
 	if f.omitEffort {
 		th.ReasoningEffort = ""
@@ -110,7 +128,11 @@ func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string
 	f.mu.Lock()
 	f.instructions = append(f.instructions, instructions)
 	block, err, warnings := f.blockUntilCtx, f.reviewErr, f.warnings
+	during := f.duringTurn
 	f.mu.Unlock()
+	if during != nil {
+		during(f.lastCwd())
+	}
 	if block {
 		<-ctx.Done()
 		return nil, fmt.Errorf("%w: %w", appserver.ErrTurnInterrupted, ctx.Err())
@@ -120,6 +142,13 @@ func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string
 	}
 	first, _, _ := strings.Cut(instructions, "\n")
 	return &appserver.Review{TurnID: "turn_1", Text: "REVIEW on " + threadID + ": " + first, Warnings: warnings}, nil
+}
+
+// lastCwd is the cwd of the most recent StartThread or ResumeThread.
+func (f *fakeReviewer) lastCwd() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.currentCwd
 }
 
 func (f *fakeReviewer) Close() {
@@ -143,12 +172,27 @@ func newHarness(t *testing.T) *harness {
 	h.svc = New(Options{
 		Store:  h.store,
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		NewReviewer: func(context.Context) (Reviewer, error) {
+		NewReviewer: func(_ context.Context, extraArgs []string) (Reviewer, error) {
 			h.spawns++
+			h.reviewer.mu.Lock()
+			h.reviewer.extraArgs = append(h.reviewer.extraArgs, extraArgs)
+			h.reviewer.mu.Unlock()
 			return h.reviewer, nil
 		},
+		CheckoutRoot: filepath.Join(resolvedTempDir(t), "checkouts"),
 	})
 	return h
+}
+
+// resolvedTempDir is a fresh temp dir with symlinks resolved, so paths the
+// service canonicalizes compare equal to it.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func (h *harness) request(commit, notes string) Request {
@@ -226,7 +270,7 @@ func TestSecondRoundResumesThreadAndNamesPreviousTip(t *testing.T) {
 	second := h.repo.commit("feature-2")
 
 	// A fresh service over the same store, as after a restart.
-	restarted := New(Options{Store: state.NewStore(h.store.Path()), NewReviewer: func(context.Context) (Reviewer, error) { return h.reviewer, nil }})
+	restarted := New(Options{Store: state.NewStore(h.store.Path()), NewReviewer: func(context.Context, []string) (Reviewer, error) { return h.reviewer, nil }})
 	res, err := restarted.Review(context.Background(), h.request(second, "r2"))
 	if err != nil {
 		t.Fatalf("second round: %v", err)
@@ -259,7 +303,7 @@ func TestResumedRoundLogsConfiguredEffortWhenUnreported(t *testing.T) {
 	restarted := New(Options{
 		Store:       state.NewStore(h.store.Path()),
 		Logger:      slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		NewReviewer: func(context.Context) (Reviewer, error) { return h.reviewer, nil },
+		NewReviewer: func(context.Context, []string) (Reviewer, error) { return h.reviewer, nil },
 	})
 	if _, err := restarted.Review(context.Background(), h.request(second, "r2")); err != nil {
 		t.Fatalf("second round: %v", err)
@@ -663,7 +707,7 @@ func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
 	probe := &lockProbeReviewer{lockPath: h.store.LockPath()}
 	probe.blockUntilCtx = true
 	probe.reviewStarted = make(chan struct{})
-	h.svc.newReviewer = func(context.Context) (Reviewer, error) { return probe, nil }
+	h.svc.newReviewer = func(context.Context, []string) (Reviewer, error) { return probe, nil }
 	tip := h.repo.git("rev-parse", "HEAD")
 
 	// Cancel only once the review is actually in progress, so the
@@ -712,5 +756,191 @@ func TestUnincrementableRoundFailsClosed(t *testing.T) {
 	reloaded, _ := h.store.Load()
 	if wf, _ := reloaded.Get(key); wf.Round != math.MaxInt {
 		t.Errorf("state changed: round %d", wf.Round)
+	}
+}
+
+// buildRequest is request with the build flag set.
+func (h *harness) buildRequest(commit, notes string) Request {
+	r := h.request(commit, notes)
+	r.Build = true
+	return r
+}
+
+// gitIn runs a Git command in dir for assertions about a checkout.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = cleanGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestBuildRoundRunsInADisposableCheckout(t *testing.T) {
+	h := newHarness(t)
+	commit := h.repo.git("rev-parse", "HEAD")
+	var seenCwd string
+	h.reviewer.duringSetup = func(cwd string) {
+		seenCwd = cwd
+		if _, err := os.Stat(filepath.Join(filepath.Dir(cwd), "tmp")); err != nil {
+			t.Errorf("temp dir missing beside the checkout while the thread exists: %v", err)
+		}
+		if head := gitIn(t, cwd, "rev-parse", "HEAD"); head != commit {
+			t.Errorf("checkout HEAD = %s, want %s", head, commit)
+		}
+	}
+	res, err := h.svc.Review(context.Background(), h.buildRequest(commit, "build me"))
+	if err != nil {
+		t.Fatalf("build round: %v", err)
+	}
+	if seenCwd == "" || seenCwd == h.repo.dir || !strings.HasPrefix(seenCwd, h.svc.checkoutRoot) {
+		t.Fatalf("thread cwd = %q, want a checkout under %s and not the worktree", seenCwd, h.svc.checkoutRoot)
+	}
+	if _, err := os.Stat(seenCwd); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("checkout %s still exists after the review: %v", seenCwd, err)
+	}
+	cacheDir := filepath.Join(filepath.Dir(seenCwd), "cache")
+	tmpDir := filepath.Join(filepath.Dir(seenCwd), "tmp")
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Errorf("cache dir %s missing after the review: %v", cacheDir, err)
+	}
+	if _, err := os.Stat(tmpDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("temp dir %s still exists after the review: %v", tmpDir, err)
+	}
+	sb := h.reviewer.sandboxes[0]
+	if !sb.Build || len(sb.WritableRoots) != 2 || sb.WritableRoots[0] != cacheDir || sb.WritableRoots[1] != tmpDir {
+		t.Errorf("sandbox = %+v, want build with the cache and temp dirs as the roots", sb)
+	}
+	args := strings.Join(h.reviewer.extraArgs[0], " ")
+	if !strings.Contains(args, "sandbox_workspace_write.writable_roots=[") || !strings.Contains(args, "TMPDIR=") {
+		t.Errorf("reviewer args %q lack the sandbox overrides", args)
+	}
+	inst := h.reviewer.instructions[0]
+	if !strings.Contains(inst, "disposable checkout") || !strings.Contains(inst, seenCwd) || !strings.Contains(inst, cacheDir) {
+		t.Errorf("prompt does not describe the checkout:\n%s", inst)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none", res.Warnings)
+	}
+	if status := h.repo.git("status", "--porcelain"); status != "" {
+		t.Errorf("worktree modified by a build review:\n%s", status)
+	}
+
+	// Identical build request replays; the same commit and notes without
+	// the flag is a new, read-only round on the same thread.
+	h.reviewer.duringSetup = nil
+	replay, err := h.svc.Review(context.Background(), h.buildRequest(commit, "build me"))
+	if err != nil || !replay.Replayed {
+		t.Fatalf("replay = %+v, %v", replay, err)
+	}
+	ro, err := h.svc.Review(context.Background(), h.request(commit, "build me"))
+	if err != nil || ro.Replayed || ro.Round != 2 {
+		t.Fatalf("read-only round = %+v, %v; want a new round 2", ro, err)
+	}
+	if got := h.reviewer.resumed; len(got) != 1 || !strings.HasSuffix(got[0], "@"+h.repo.dir) {
+		t.Errorf("resumed = %v, want one resume on the worktree", got)
+	}
+	if sb := h.reviewer.sandboxes[1]; sb.Build || h.reviewer.extraArgs[1] != nil {
+		t.Errorf("read-only round used build settings: %+v %v", sb, h.reviewer.extraArgs[1])
+	}
+}
+
+func TestBuildCheckoutIsRemovedWhenTheTurnFails(t *testing.T) {
+	h := newHarness(t)
+	h.reviewer.reviewErr = errors.New("turn failed")
+	var cwd string
+	h.reviewer.duringSetup = func(c string) { cwd = c }
+	if _, err := h.svc.Review(context.Background(), h.buildRequest(h.repo.git("rev-parse", "HEAD"), "n")); err == nil {
+		t.Fatal("expected the turn failure")
+	}
+	if cwd == "" {
+		t.Fatal("thread was never started")
+	}
+	if _, err := os.Stat(cwd); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("checkout survived a failed turn: %v", err)
+	}
+}
+
+func TestBuildCheckoutIsRemovedOnCancellation(t *testing.T) {
+	h := newHarness(t)
+	h.reviewer.blockUntilCtx = true
+	h.reviewer.reviewStarted = make(chan struct{})
+	var cwd string
+	h.reviewer.duringSetup = func(c string) { cwd = c }
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-h.reviewer.reviewStarted
+		cancel()
+	}()
+	_, err := h.svc.Review(ctx, h.buildRequest(h.repo.git("rev-parse", "HEAD"), "n"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want cancellation", err)
+	}
+	if _, err := os.Stat(cwd); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("checkout survived cancellation: %v", err)
+	}
+	if h.reviewer.closed != 1 {
+		t.Errorf("reviewer closed %d times, want 1", h.reviewer.closed)
+	}
+}
+
+func TestBuildRoundReportsTrackedFilesTheReviewerChanged(t *testing.T) {
+	h := newHarness(t)
+	h.reviewer.duringTurn = func(cwd string) {
+		// The test repository's commits write feature-1 style files; append
+		// to whichever tracked file comes first.
+		name := strings.Split(gitIn(t, cwd, "ls-files"), "\n")[0]
+		f, err := os.OpenFile(filepath.Join(cwd, name), os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("reviewer edit\n")
+		_ = f.Close()
+	}
+	res, err := h.svc.Review(context.Background(), h.buildRequest(h.repo.git("rev-parse", "HEAD"), "n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "changed 1 tracked file") {
+		t.Errorf("warnings = %v, want one about the changed tracked file", res.Warnings)
+	}
+	st, _ := h.store.Load()
+	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
+	if wf, _ := st.Get(gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")); len(wf.LastWarnings) != 1 {
+		t.Errorf("persisted warnings = %v, want the integrity warning", wf.LastWarnings)
+	}
+}
+
+func TestReadOnlyRoundTouchesNoScratch(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.svc.Review(context.Background(), h.request(h.repo.git("rev-parse", "HEAD"), "n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(h.svc.checkoutRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("read-only review created the scratch root: %v", err)
+	}
+	if h.reviewer.extraArgs[0] != nil || h.reviewer.sandboxes[0].Build {
+		t.Errorf("read-only review used build settings")
+	}
+	if strings.Contains(h.reviewer.instructions[0], "disposable checkout") {
+		t.Error("read-only prompt mentions the checkout")
+	}
+}
+
+func TestBuildRoundFailsBeforeCodexWhenScratchOverlapsTheRepository(t *testing.T) {
+	h := newHarness(t)
+	h.svc.checkoutRoot = filepath.Join(h.repo.dir, "scratch")
+	_, err := h.svc.Review(context.Background(), h.buildRequest(h.repo.git("rev-parse", "HEAD"), "n"))
+	if !errors.Is(err, scratch.ErrRootOverlapsRepository) {
+		t.Fatalf("error = %v, want ErrRootOverlapsRepository", err)
+	}
+	if h.spawns != 0 {
+		t.Errorf("app-server spawned %d times for a rejected scratch root", h.spawns)
+	}
+	if status := h.repo.git("status", "--porcelain"); status != "" {
+		t.Errorf("worktree modified:\n%s", status)
 	}
 }

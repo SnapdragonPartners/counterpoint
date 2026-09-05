@@ -17,6 +17,7 @@ import (
 
 	"github.com/SnapdragonPartners/counterpoint/internal/appserver"
 	"github.com/SnapdragonPartners/counterpoint/internal/gitrepo"
+	"github.com/SnapdragonPartners/counterpoint/internal/scratch"
 	"github.com/SnapdragonPartners/counterpoint/internal/state"
 )
 
@@ -77,8 +78,8 @@ func RequestIDFrom(ctx context.Context) string {
 // implementation is *appserver.Client; tests substitute a fake so the
 // orchestration is covered without a subprocess.
 type Reviewer interface {
-	StartThread(ctx context.Context, cwd string) (appserver.Thread, error)
-	ResumeThread(ctx context.Context, threadID, cwd string) (appserver.Thread, error)
+	StartThread(ctx context.Context, cwd string, sb appserver.Sandbox) (appserver.Thread, error)
+	ResumeThread(ctx context.Context, threadID, cwd string, sb appserver.Sandbox) (appserver.Thread, error)
 	UnarchiveThread(ctx context.Context, threadID string) error
 	SetThreadName(ctx context.Context, threadID, name string) error
 	// AddWarning queues a bridge-level warning for the next Review result
@@ -94,6 +95,10 @@ type Request struct {
 	Branch      string
 	Commit      string
 	BranchNotes string
+	// Build asks for a build-capable review: the reviewer works in a
+	// disposable checkout of the commit where it may build and run tests.
+	// The default is a read-only review of the caller's worktree.
+	Build bool
 }
 
 // Result is the review tool's output.
@@ -113,20 +118,26 @@ type Result struct {
 // Options configures a Service.
 type Options struct {
 	Store *state.Store
-	// NewReviewer starts an app-server session for one review. When nil,
-	// DefaultReviewer with the codex executable is used.
-	NewReviewer func(ctx context.Context) (Reviewer, error)
+	// NewReviewer starts an app-server session for one review. extraArgs
+	// are configuration overrides for that session, such as the sandbox
+	// settings of a build-capable review. When nil, DefaultReviewer with
+	// the codex executable is used.
+	NewReviewer func(ctx context.Context, extraArgs []string) (Reviewer, error)
 	Logger      *slog.Logger
 	Version     string
+	// CheckoutRoot is the scratch root for build-capable reviews;
+	// scratch.DefaultRoot when empty.
+	CheckoutRoot string
 }
 
 // Service runs reviews.
 type Service struct {
 	store        *state.Store
-	newReviewer  func(ctx context.Context) (Reviewer, error)
+	newReviewer  func(ctx context.Context, extraArgs []string) (Reviewer, error)
 	log          *slog.Logger
 	timeout      time.Duration
 	setupTimeout time.Duration
+	checkoutRoot string
 }
 
 // New returns a Service.
@@ -139,15 +150,17 @@ func New(opts Options) *Service {
 	if nr == nil {
 		nr = DefaultReviewer(opts.Version, log)
 	}
-	return &Service{store: opts.Store, newReviewer: nr, log: log, timeout: Timeout, setupTimeout: SetupTimeout}
+	return &Service{store: opts.Store, newReviewer: nr, log: log, timeout: Timeout, setupTimeout: SetupTimeout, checkoutRoot: opts.CheckoutRoot}
 }
 
-// DefaultReviewer starts codex app-server with the fixed reasoning effort.
-// The handshake is bounded by the setup context the service passes; the
-// process lifetime is owned by the client's Close.
-func DefaultReviewer(version string, log *slog.Logger) func(ctx context.Context) (Reviewer, error) {
-	return func(ctx context.Context) (Reviewer, error) {
+// DefaultReviewer starts codex app-server with the fixed reasoning effort
+// and the session's extra configuration overrides. The handshake is bounded
+// by the setup context the service passes; the process lifetime is owned by
+// the client's Close.
+func DefaultReviewer(version string, log *slog.Logger) func(ctx context.Context, extraArgs []string) (Reviewer, error) {
+	return func(ctx context.Context, extraArgs []string) (Reviewer, error) {
 		args := append(appserver.DefaultArgs(), "-c", fmt.Sprintf("model_reasoning_effort=%q", ReasoningEffort))
+		args = append(args, extraArgs...)
 		return appserver.Start(ctx, appserver.Options{
 			Command: appserver.DefaultCommand,
 			Args:    args,
@@ -237,6 +250,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		Commit:      target.Commit,
 		Base:        target.Base,
 		BranchNotes: req.BranchNotes,
+		Build:       req.Build,
 	}
 	hash := ident.Hash()
 	if prev, ok := st.Replay(key, hash); ok {
@@ -254,11 +268,39 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		PreviousTip: wf.LastCommit, HistoryRewritten: target.HistoryRewritten, BranchNotes: req.BranchNotes,
 	}
 
+	// A build-capable review runs in a disposable checkout of the commit,
+	// never in the caller's worktree. The checkout is prepared inside the
+	// review lock and removed on every exit path; its deferred Close runs
+	// after the reviewer's, so the child has exited before its cwd goes.
+	cwd := repo.Worktree
+	var sandbox appserver.Sandbox
+	var extraArgs []string
+	var checkout *scratch.Checkout
+	if req.Build {
+		checkout, err = scratch.Prepare(ctx, scratch.Options{
+			Root: s.checkoutRoot, WorkflowKey: key, Repo: repo, Commit: target.Commit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if cerr := checkout.Close(); cerr != nil {
+				s.log.Warn("remove disposable checkout", "request", requestID, "workflow", key, "error", cerr)
+			}
+		}()
+		cwd = checkout.Dir
+		sandbox = appserver.Sandbox{Build: true, WritableRoots: []string{checkout.CacheDir, checkout.TmpDir}}
+		extraArgs = appserver.BuildConfigArgs(checkout.CacheDir, checkout.TmpDir)
+		prompt.Checkout = checkout.Dir
+		prompt.CacheDir = checkout.CacheDir
+		s.log.Info("disposable checkout ready", "request", requestID, "workflow", key, "checkout", checkout.Dir, "commit", target.Commit)
+	}
+
 	// Setup, from spawning the child through the thread call, has its own
 	// bound because the review timer has not started yet.
 	setupCtx, cancelSetup := context.WithTimeoutCause(ctx, s.setupTimeout, ErrSetupTimeout)
 	defer cancelSetup()
-	reviewer, err := s.newReviewer(setupCtx)
+	reviewer, err := s.newReviewer(setupCtx, extraArgs)
 	if err != nil {
 		return nil, setupError(setupCtx, err)
 	}
@@ -266,7 +308,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 
 	var thread appserver.Thread
 	if known {
-		thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
+		thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, cwd, sandbox)
 		var refused *appserver.ServerError
 		// The setup context is checked before each recovery call: an
 		// aborted review must not go on to change the thread's archival
@@ -284,7 +326,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 			} else if setupCtx.Err() == nil {
 				s.log.Info("stored thread unarchived", "request", requestID, "workflow", key, "thread", abbreviate(wf.ThreadID))
 				reviewer.AddWarning("the stored Codex thread was archived; Counterpoint unarchived it and resumed the review there")
-				thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, repo.Worktree)
+				thread, err = reviewer.ResumeThread(setupCtx, wf.ThreadID, cwd, sandbox)
 			}
 		}
 		if err != nil {
@@ -298,7 +340,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 			return nil, fmt.Errorf("%w: workflow %s in %s: %w; %s", ErrThreadUnavailable, key, s.store.Path(), err, threadRecoveryHint)
 		}
 	} else {
-		thread, err = reviewer.StartThread(setupCtx, repo.Worktree)
+		thread, err = reviewer.StartThread(setupCtx, cwd, sandbox)
 		if err != nil {
 			return nil, setupError(setupCtx, err)
 		}
@@ -322,7 +364,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	// "no effort".
 	s.log.Info("review turn starting", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
 		"model", thread.Model, "effort", ReasoningEffort, "reported_effort", thread.ReasoningEffort,
-		"commit", target.Commit, "base", target.Base)
+		"commit", target.Commit, "base", target.Base, "build", req.Build)
 
 	turnCtx, cancel := context.WithTimeoutCause(ctx, s.timeout, ErrTimeout)
 	defer cancel()
@@ -333,6 +375,27 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		}
 		s.log.Warn("review turn failed", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID), "error", err)
 		return nil, err
+	}
+
+	if checkout != nil {
+		// The reviewer may build and test in the checkout, but its results
+		// only describe the commit if tracked files are unchanged. Anything
+		// from a lockfile rewrite to an edit despite instructions is
+		// reported; untracked build output is expected.
+		n, cerr := checkout.ModifiedTrackedFiles(ctx)
+		if cerr != nil {
+			s.log.Warn("checkout integrity check failed", "request", requestID, "workflow", key, "error", cerr)
+		}
+		if n > 0 || cerr != nil {
+			w := fmt.Sprintf("the reviewer changed %d tracked file(s) in the disposable checkout; its build and test results may not describe the reviewed commit", n)
+			if cerr != nil {
+				w = "the disposable checkout could not be checked for changes; the reviewer's build and test results may not describe the reviewed commit"
+			}
+			s.log.Warn(w, "request", requestID, "workflow", key)
+			if ws, ok := appserver.AppendWarning(rev.Warnings, w); ok {
+				rev.Warnings = ws
+			}
+		}
 	}
 
 	st.Put(key, state.Workflow{

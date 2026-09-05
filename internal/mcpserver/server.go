@@ -43,6 +43,7 @@ type Input struct {
 	Branch      string `json:"branch" jsonschema:"Local branch name, bare or as refs/heads/<name>; never the primary branch"`
 	Commit      string `json:"commit" jsonschema:"Commit to review; must be the branch tip and the checked-out HEAD of a clean worktree"`
 	BranchNotes string `json:"branch_notes" jsonschema:"Author-written handoff notes (at most 1 MiB): what changed, verification, how prior findings were resolved, open questions"`
+	Build       bool   `json:"build,omitempty" jsonschema:"Ask for a build-capable review: the reviewer gets a disposable checkout of the commit where it can build and run tests (offline). Costs more wall-clock time; default false is a read-only review of the worktree"`
 }
 
 // Output is the review tool's structured result.
@@ -76,10 +77,10 @@ func New(lifecycle context.Context, svc *review.Service, version string, log *sl
 
 		id := newRequestID()
 		ctx = review.WithRequestID(ctx, id)
-		log.Info("review request received", "request", id, "branch", in.Branch, "commit", in.Commit, "notes_bytes", len(in.BranchNotes))
+		log.Info("review request received", "request", id, "branch", in.Branch, "commit", in.Commit, "notes_bytes", len(in.BranchNotes), "build", in.Build)
 
 		res, err := svc.Review(ctx, review.Request{
-			Repo: in.Repo, Branch: in.Branch, Commit: in.Commit, BranchNotes: in.BranchNotes,
+			Repo: in.Repo, Branch: in.Branch, Commit: in.Commit, BranchNotes: in.BranchNotes, Build: in.Build,
 		})
 		if err != nil {
 			// Returned errors become tool errors, not protocol errors.

@@ -25,11 +25,11 @@ import (
 
 type stubReviewer struct{}
 
-func (stubReviewer) StartThread(context.Context, string) (appserver.Thread, error) {
+func (stubReviewer) StartThread(context.Context, string, appserver.Sandbox) (appserver.Thread, error) {
 	return appserver.Thread{ID: "thr_1"}, nil
 }
 
-func (stubReviewer) ResumeThread(_ context.Context, id, _ string) (appserver.Thread, error) {
+func (stubReviewer) ResumeThread(_ context.Context, id, _ string, _ appserver.Sandbox) (appserver.Thread, error) {
 	return appserver.Thread{ID: id}, nil
 }
 
@@ -74,7 +74,7 @@ func TestReviewToolOverInMemoryTransport(t *testing.T) {
 	dir := gitRepo(t)
 	svc := review.New(review.Options{
 		Store:       state.NewStore(filepath.Join(t.TempDir(), "state.json")),
-		NewReviewer: func(context.Context) (review.Reviewer, error) { return stubReviewer{}, nil },
+		NewReviewer: func(context.Context, []string) (review.Reviewer, error) { return stubReviewer{}, nil },
 		Logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	})
 	server := New(context.Background(), svc, "test", slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
@@ -153,11 +153,11 @@ type blockingReviewer struct {
 	closed  chan struct{}
 }
 
-func (b *blockingReviewer) StartThread(context.Context, string) (appserver.Thread, error) {
+func (b *blockingReviewer) StartThread(context.Context, string, appserver.Sandbox) (appserver.Thread, error) {
 	return appserver.Thread{ID: "thr_1"}, nil
 }
 
-func (b *blockingReviewer) ResumeThread(_ context.Context, id, _ string) (appserver.Thread, error) {
+func (b *blockingReviewer) ResumeThread(_ context.Context, id, _ string, _ appserver.Sandbox) (appserver.Thread, error) {
 	return appserver.Thread{ID: id}, nil
 }
 
@@ -182,7 +182,7 @@ func TestLifecycleCancellationInterruptsActiveReview(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	svc := review.New(review.Options{
 		Store:       state.NewStore(filepath.Join(t.TempDir(), "state.json")),
-		NewReviewer: func(context.Context) (review.Reviewer, error) { return rev, nil },
+		NewReviewer: func(context.Context, []string) (review.Reviewer, error) { return rev, nil },
 		Logger:      log,
 	})
 	lifecycle, shutdown := context.WithCancel(context.Background())
@@ -274,7 +274,7 @@ func TestBoundedLineReader(t *testing.T) {
 
 func TestMultilineRequestEndsSession(t *testing.T) {
 	svc := review.New(review.Options{Store: state.NewStore(filepath.Join(t.TempDir(), "state.json")),
-		NewReviewer: func(context.Context) (review.Reviewer, error) { return stubReviewer{}, nil },
+		NewReviewer: func(context.Context, []string) (review.Reviewer, error) { return stubReviewer{}, nil },
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil))})
 	server := New(context.Background(), svc, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -301,7 +301,7 @@ func TestMultilineRequestEndsSession(t *testing.T) {
 
 func TestOversizedRequestEndsSession(t *testing.T) {
 	svc := review.New(review.Options{Store: state.NewStore(filepath.Join(t.TempDir(), "state.json")),
-		NewReviewer: func(context.Context) (review.Reviewer, error) { return stubReviewer{}, nil },
+		NewReviewer: func(context.Context, []string) (review.Reviewer, error) { return stubReviewer{}, nil },
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil))})
 	server := New(context.Background(), svc, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 
 func startThread(t *testing.T, cl *Client) Thread {
 	t.Helper()
-	th, err := cl.StartThread(context.Background(), "/work/tree")
+	th, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{})
 	if err != nil {
 		t.Fatalf("StartThread: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestConcurrentCallsAreDispatchedByID(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			th, err := cl.StartThread(context.Background(), "/work/tree")
+			th, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{})
 			ids[i], errs[i] = th.ID, err
 		}()
 	}
@@ -143,7 +144,7 @@ func TestResumeAcrossProcessRestart(t *testing.T) {
 	cl.Close()
 
 	cl2, _ := fakeClient(t, "normal", statePath)
-	resumed, err := cl2.ResumeThread(context.Background(), th.ID, "/other/worktree")
+	resumed, err := cl2.ResumeThread(context.Background(), th.ID, "/other/worktree", Sandbox{})
 	if err != nil {
 		t.Fatalf("ResumeThread after restart: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestResumeAcrossProcessRestart(t *testing.T) {
 		t.Errorf("Review on resumed thread = %v, %v", rev, err)
 	}
 
-	_, err = cl2.ResumeThread(context.Background(), "thr_nope", "/other/worktree")
+	_, err = cl2.ResumeThread(context.Background(), "thr_nope", "/other/worktree", Sandbox{})
 	if err == nil || errors.Is(err, ErrProcessExited) {
 		t.Errorf("ResumeThread(unknown) error = %v, want a protocol error", err)
 	}
@@ -172,7 +173,7 @@ func TestUnarchiveThreadMakesAnArchivedThreadResumable(t *testing.T) {
 	cl.Close()
 
 	cl2, _ := fakeClient(t, "archived", statePath)
-	_, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree")
+	_, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree", Sandbox{})
 	var srvErr *ServerError
 	if !errors.As(err, &srvErr) {
 		t.Fatalf("ResumeThread(archived) error = %v, want a server error", err)
@@ -180,7 +181,7 @@ func TestUnarchiveThreadMakesAnArchivedThreadResumable(t *testing.T) {
 	if err := cl2.UnarchiveThread(context.Background(), th.ID); err != nil {
 		t.Fatalf("UnarchiveThread: %v", err)
 	}
-	if _, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree"); err != nil {
+	if _, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree", Sandbox{}); err != nil {
 		t.Fatalf("ResumeThread after unarchive: %v", err)
 	}
 	// Not idempotent, as in codex-cli 0.153.1.
@@ -204,7 +205,7 @@ func TestUnarchiveThreadFailsWhileAnotherProcessHoldsTheWriter(t *testing.T) {
 
 	cl2, _ := fakeClient(t, "writer-held", statePath)
 	var srvErr *ServerError
-	if _, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree"); !errors.As(err, &srvErr) {
+	if _, err := cl2.ResumeThread(context.Background(), th.ID, "/work/tree", Sandbox{}); !errors.As(err, &srvErr) {
 		t.Fatalf("ResumeThread(held) error = %v, want a server error", err)
 	}
 	if err := cl2.UnarchiveThread(context.Background(), th.ID); !errors.As(err, &srvErr) {
@@ -332,7 +333,7 @@ func TestContextCancellationInterruptsTurn(t *testing.T) {
 	}
 
 	// The connection is still usable afterwards.
-	if _, err := cl.StartThread(context.Background(), "/work/tree"); err != nil {
+	if _, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{}); err != nil {
 		t.Errorf("StartThread after interrupt: %v", err)
 	}
 }
@@ -366,7 +367,7 @@ func TestOversizedOutgoingMessageIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrMessageTooLarge) {
 		t.Fatalf("Review error = %v, want ErrMessageTooLarge", err)
 	}
-	if _, err := cl.StartThread(context.Background(), "/work/tree"); err != nil {
+	if _, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{}); err != nil {
 		t.Errorf("connection unusable after refused write: %v", err)
 	}
 }
@@ -378,7 +379,7 @@ func TestProcessExitMidReview(t *testing.T) {
 	if !errors.Is(err, ErrProcessExited) {
 		t.Fatalf("Review error = %v, want ErrProcessExited", err)
 	}
-	if _, err := cl.StartThread(context.Background(), "/work/tree"); !errors.Is(err, ErrProcessExited) {
+	if _, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{}); !errors.Is(err, ErrProcessExited) {
 		t.Errorf("StartThread after exit error = %v, want ErrProcessExited", err)
 	}
 }
@@ -510,7 +511,7 @@ func TestIncompatibleInitializeIsRejected(t *testing.T) {
 
 func TestEffectivePolicyMismatchFailsClosed(t *testing.T) {
 	cl, _ := fakeClient(t, "wrong-policy", "")
-	_, err := cl.StartThread(context.Background(), "/work/tree")
+	_, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{})
 	if !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatalf("StartThread error = %v, want ErrPolicyMismatch", err)
 	}
@@ -543,7 +544,7 @@ func TestCodexErrorCodeRendering(t *testing.T) {
 
 func TestEffectiveCwdMismatchFailsClosed(t *testing.T) {
 	cl, _ := fakeClient(t, "wrong-cwd", "")
-	_, err := cl.StartThread(context.Background(), "/work/tree")
+	_, err := cl.StartThread(context.Background(), "/work/tree", Sandbox{})
 	if !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatalf("StartThread error = %v, want ErrPolicyMismatch", err)
 	}
@@ -623,7 +624,7 @@ func TestWriterExitsOnCloseAndOnChildExit(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Error("writer still running after the child exited")
 	}
-	if _, err := cl2.StartThread(context.Background(), "/work/tree"); !errors.Is(err, ErrProcessExited) {
+	if _, err := cl2.StartThread(context.Background(), "/work/tree", Sandbox{}); !errors.Is(err, ErrProcessExited) {
 		t.Errorf("send after child exit error = %v, want ErrProcessExited", err)
 	}
 }
@@ -632,7 +633,7 @@ func TestResumeReturningAnotherThreadFailsClosed(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "threads")
 	cl, _ := fakeClient(t, "resume-other-id", statePath)
 	th := startThread(t, cl)
-	_, err := cl.ResumeThread(context.Background(), th.ID, "/work/tree")
+	_, err := cl.ResumeThread(context.Background(), th.ID, "/work/tree", Sandbox{})
 	if !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatalf("ResumeThread error = %v, want ErrPolicyMismatch", err)
 	}
@@ -749,5 +750,121 @@ func TestStalledInitializeIsCancellable(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > closeGrace+3*time.Second {
 		t.Errorf("Start took %v to give up and reap the child", elapsed)
+	}
+}
+
+func TestCheckSandboxRequiresTheExactRequestedPolicy(t *testing.T) {
+	build := Sandbox{Build: true, WritableRoots: []string{"/cache"}}
+	good := sandboxPolicy{Type: "workspaceWrite", WritableRoots: []string{"/cache"}, ExcludeSlashTmp: true, ExcludeTmpdirEnvVar: true}
+	cases := []struct {
+		name string
+		got  sandboxPolicy
+		want Sandbox
+		ok   bool
+	}{
+		{"read-only as requested", sandboxPolicy{Type: "readOnly"}, Sandbox{}, true},
+		{"workspace when read-only requested", good, Sandbox{}, false},
+		{"read-only when build requested", sandboxPolicy{Type: "readOnly"}, build, false},
+		{"exact build policy", good, build, true},
+		{"network on", sandboxPolicy{Type: "workspaceWrite", NetworkAccess: true, WritableRoots: []string{"/cache"}, ExcludeSlashTmp: true, ExcludeTmpdirEnvVar: true}, build, false},
+		{"extra root", sandboxPolicy{Type: "workspaceWrite", WritableRoots: []string{"/cache", "/extra"}, ExcludeSlashTmp: true, ExcludeTmpdirEnvVar: true}, build, false},
+		{"missing root", sandboxPolicy{Type: "workspaceWrite", ExcludeSlashTmp: true, ExcludeTmpdirEnvVar: true}, build, false},
+		{"duplicate root", sandboxPolicy{Type: "workspaceWrite", WritableRoots: []string{"/cache", "/cache"}, ExcludeSlashTmp: true, ExcludeTmpdirEnvVar: true}, Sandbox{Build: true, WritableRoots: []string{"/cache", "/other"}}, false},
+		{"/tmp kept writable", sandboxPolicy{Type: "workspaceWrite", WritableRoots: []string{"/cache"}, ExcludeTmpdirEnvVar: true}, build, false},
+		{"$TMPDIR kept writable", sandboxPolicy{Type: "workspaceWrite", WritableRoots: []string{"/cache"}, ExcludeSlashTmp: true}, build, false},
+	}
+	for _, tc := range cases {
+		err := checkSandbox(tc.got, tc.want)
+		if tc.ok && err != nil {
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+		}
+		if !tc.ok && !errors.Is(err, ErrPolicyMismatch) {
+			t.Errorf("%s: error = %v, want ErrPolicyMismatch", tc.name, err)
+		}
+	}
+}
+
+func TestBuildConfigArgsQuoteTOMLStrings(t *testing.T) {
+	args := BuildConfigArgs(`/c/"quoted"\dir`, "/w/tmp")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		`sandbox_workspace_write.writable_roots=["/c/\"quoted\"\\dir","/w/tmp"]`,
+		"sandbox_workspace_write.exclude_slash_tmp=true",
+		"sandbox_workspace_write.exclude_tmpdir_env_var=true",
+		`shell_environment_policy.set.TMPDIR="/w/tmp"`,
+		`shell_environment_policy.set.COUNTERPOINT_CACHE_DIR="/c/\"quoted\"\\dir"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args %q lack %q", joined, want)
+		}
+	}
+	if n := strings.Count(joined, "-c "); n != 5 {
+		t.Errorf("%d -c flags, want 5", n)
+	}
+}
+
+func TestAppendWarningHonorsTheBounds(t *testing.T) {
+	var list []string
+	for i := 0; i < maxWarnings; i++ {
+		var ok bool
+		if list, ok = AppendWarning(list, "w"); !ok {
+			t.Fatalf("entry %d refused", i)
+		}
+	}
+	if _, ok := AppendWarning(list, "one too many"); ok {
+		t.Error("entry beyond the count cap accepted")
+	}
+	if _, ok := AppendWarning([]string{"x"}, strings.Repeat("y", maxWarningBytes)); ok {
+		t.Error("entry beyond the byte cap accepted")
+	}
+	if got, ok := AppendWarning([]string{"a"}, "b"); !ok || len(got) != 2 {
+		t.Errorf("AppendWarning([a], b) = %v, %v", got, ok)
+	}
+}
+
+// fakeClientArgs is fakeClient with configuration overrides on the child's
+// command line, which the fake parses and echoes as its effective policy.
+func fakeClientArgs(t *testing.T, scenario string, extraArgs []string) *Client {
+	t.Helper()
+	t.Setenv(apptest.ScenarioEnv, scenario)
+	t.Setenv(apptest.StateEnv, "")
+	cl, err := Start(context.Background(), Options{
+		Command: os.Args[0], Args: append(DefaultArgs(), extraArgs...), Version: "test",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("Start(%s): %v", scenario, err)
+	}
+	t.Cleanup(cl.Close)
+	return cl
+}
+
+func TestWorkspaceWriteSessionIsValidatedAgainstTheEchoedPolicy(t *testing.T) {
+	build := Sandbox{Build: true, WritableRoots: []string{"/cache/dir", "/w/tmp"}}
+	args := BuildConfigArgs("/cache/dir", "/w/tmp")
+
+	cl := fakeClientArgs(t, "normal", args)
+	th, err := cl.StartThread(context.Background(), "/work/tree", build)
+	if err != nil {
+		t.Fatalf("StartThread(build): %v", err)
+	}
+	if _, err := cl.ResumeThread(context.Background(), th.ID, "/work/tree", build); err != nil {
+		t.Fatalf("ResumeThread(build): %v", err)
+	}
+	// The same thread may go back to read-only on the worktree.
+	if _, err := cl.ResumeThread(context.Background(), th.ID, "/user/worktree", Sandbox{}); err != nil {
+		t.Fatalf("ResumeThread(read-only): %v", err)
+	}
+
+	// Without the overrides the server reports no roots and writable temp
+	// roots; the exact check must refuse that.
+	plain := fakeClientArgs(t, "normal", nil)
+	if _, err := plain.StartThread(context.Background(), "/work/tree", build); !errors.Is(err, ErrPolicyMismatch) {
+		t.Errorf("StartThread without overrides error = %v, want ErrPolicyMismatch", err)
+	}
+
+	wrong := fakeClientArgs(t, "workspace-wrong-roots", args)
+	if _, err := wrong.StartThread(context.Background(), "/work/tree", build); !errors.Is(err, ErrPolicyMismatch) {
+		t.Errorf("StartThread with an extra root error = %v, want ErrPolicyMismatch", err)
 	}
 }
