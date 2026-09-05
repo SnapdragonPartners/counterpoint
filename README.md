@@ -32,7 +32,8 @@ links the follow-up issues.
    branch, and Codex reviews the branch snapshot at that commit, from its merge
    base with the primary branch to the tip, without modifying the workspace.
 5. The authoring agent addresses findings, commits the next round, and calls the
-   same tool again. Codex retains the earlier review context.
+   same tool again. Counterpoint quotes the last three rounds' verdicts back
+   to the reviewer, which otherwise starts each round without memory.
 6. After Codex approves, work stops at a human gate. Counterpoint does not push,
    open a pull request, merge, or approve on the human's behalf.
 

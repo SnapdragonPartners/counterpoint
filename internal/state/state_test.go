@@ -72,7 +72,7 @@ func TestSaveThenLoadRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"version": 1`) {
+	if !strings.Contains(string(data), `"version": 2`) {
 		t.Errorf("state file lacks version envelope:\n%s", data)
 	}
 }
@@ -155,7 +155,7 @@ func TestUnsupportedVersionIsRejectedAndPreserved(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(st.Path()), dirPerm); err != nil {
 		t.Fatal(err)
 	}
-	future := []byte(`{"version": 2, "workflows": {}}` + "\n")
+	future := []byte(`{"version": 3, "workflows": {}}` + "\n")
 	if err := os.WriteFile(st.Path(), future, filePerm); err != nil {
 		t.Fatal(err)
 	}

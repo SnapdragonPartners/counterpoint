@@ -78,6 +78,13 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 	if two.Commit != b || two.Base != one.Base {
 		t.Errorf("round two target = %s base %s; want %s base %s", two.Commit, two.Base, b, one.Base)
 	}
+	// Retained context across the restart: the round-two prompt quotes the
+	// round-one verdict verbatim, delimited, with its commit and base.
+	instructions, _ := os.ReadFile(fakeState + ".instructions")
+	quoted := "Round 1, commit " + a + ", base " + one.Base + ". The verdict is exactly the text between <<<ROUND 1 REVIEW>>> and <<<END ROUND 1 REVIEW>>>.\n<<<ROUND 1 REVIEW>>>\n" + one.Review + "\n<<<END ROUND 1 REVIEW>>>\n"
+	if !strings.Contains(string(instructions), quoted) {
+		t.Errorf("round two prompt does not quote the round one verdict:\n%s", instructions)
+	}
 
 	// Identical request replays without a process.
 	replay, err := newService().Review(context.Background(), req(b, "Round two: addressed findings."))
@@ -98,6 +105,11 @@ func TestEndToEndAgainstFakeAppServer(t *testing.T) {
 	}
 	if three.Round != 3 || !strings.Contains(three.Review, "REVIEW for thr_1") {
 		t.Fatalf("round three did not continue on the unarchived thread: %+v", three)
+	}
+	instructions, _ = os.ReadFile(fakeState + ".instructions")
+	if got := string(instructions); !strings.Contains(got, "<<<ROUND 1 REVIEW>>>\n"+one.Review+"\n") || !strings.Contains(got, "<<<ROUND 2 REVIEW>>>\n"+two.Review+"\n") ||
+		strings.Index(got, "<<<ROUND 1 REVIEW>>>") > strings.Index(got, "<<<ROUND 2 REVIEW>>>") {
+		t.Errorf("round three prompt lacks rounds one and two in order:\n%s", got)
 	}
 	if len(three.Warnings) != 1 || !strings.Contains(three.Warnings[0], "unarchived") {
 		t.Errorf("round three warnings = %v, want one about unarchiving", three.Warnings)

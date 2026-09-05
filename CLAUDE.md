@@ -98,11 +98,14 @@ handoff is normally a tool call, not a message to DR:
   costs a cold build per branch plus a test run per round.
 - If the tool is not available in the session, write the branch notes and ask
   DR to submit them to Codex manually, then wait for the relayed findings.
-- The Codex thread is persistent per repository and branch, so each round
-  builds on the previous one. Assume the thread persists and write later
-  rounds' notes as a delta, but keep the disposition of every prior finding in
-  each round's notes so a reviewer that lost context can still verify. A new
-  or renamed branch starts a new thread with no memory of earlier ones. If the
+- The Codex thread is persistent per repository and branch, but it is an
+  audit log, not the reviewer's memory: Codex's review mode starts each
+  round fresh, and the reviewer's memory is the last three rounds' verdicts
+  that Counterpoint quotes into the prompt from its ledger. Write later
+  rounds' notes as a delta, but keep the disposition of every prior finding
+  in each round's notes, since older rounds are evicted from the ledger and
+  the reviewer is told to re-validate rather than trust its earlier output.
+  A new or renamed branch starts a new thread and an empty ledger. If the
   tool reports the thread is unavailable, stop and tell DR rather than working
   around it; the error says what DR can do (usually archive the thread in the
   Codex app so the next call can unarchive and take it over).

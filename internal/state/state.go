@@ -18,8 +18,14 @@ import (
 )
 
 const (
-	// Version is the state envelope version this package reads and writes.
-	Version = 1
+	// Version is the state envelope version this package writes. Version 1
+	// files, which predate the review history, are read as version 2 files
+	// with empty history and rewritten as version 2 on the next save; a
+	// version 1 binary rejects a version 2 file instead of silently
+	// dropping the history.
+	Version = 2
+	// oldestReadableVersion is the earliest envelope version Load accepts.
+	oldestReadableVersion = 1
 
 	// EnvStatePath is the single environment variable that overrides the
 	// state file location, for tests and unusual installations.
@@ -57,6 +63,9 @@ type Workflow struct {
 	Round           int      `json:"round"`
 	LastReview      string   `json:"last_review"`
 	LastWarnings    []string `json:"last_warnings,omitempty"`
+	// History holds the completed rounds before the one in LastReview,
+	// oldest first, under the bounds in history.go.
+	History []HistoryRecord `json:"history,omitempty"`
 }
 
 // State is the in-memory form of the state file.
@@ -151,8 +160,8 @@ func (st *Store) Load() (*State, error) {
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrMalformed, st.path, err)
 	}
-	if env.Version != Version {
-		return nil, fmt.Errorf("%w: %s has version %d, want %d", ErrUnsupportedVersion, st.path, env.Version, Version)
+	if env.Version < oldestReadableVersion || env.Version > Version {
+		return nil, fmt.Errorf("%w: %s has version %d, want %d to %d", ErrUnsupportedVersion, st.path, env.Version, oldestReadableVersion, Version)
 	}
 	if env.Workflows == nil {
 		env.Workflows = map[string]Workflow{}
