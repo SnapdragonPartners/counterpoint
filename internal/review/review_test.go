@@ -50,6 +50,7 @@ type fakeReviewer struct {
 	cancelOnResume context.CancelFunc // called before a scripted resume failure is returned
 	named          []string
 	nameErr        error
+	reviewText     string // when set, the review text returned instead of the derived one
 }
 
 func (f *fakeReviewer) StartThread(ctx context.Context, cwd string, sb appserver.Sandbox) (appserver.Thread, error) {
@@ -141,7 +142,11 @@ func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string
 		return nil, err
 	}
 	first, _, _ := strings.Cut(instructions, "\n")
-	return &appserver.Review{TurnID: "turn_1", Text: "REVIEW on " + threadID + ": " + first, Warnings: warnings}, nil
+	text := "REVIEW on " + threadID + ": " + first
+	if f.reviewText != "" {
+		text = f.reviewText
+	}
+	return &appserver.Review{TurnID: "turn_1", Text: text, Warnings: warnings}, nil
 }
 
 // lastCwd is the cwd of the most recent StartThread or ResumeThread.
@@ -259,6 +264,241 @@ func TestIdenticalRequestReplaysWithoutSpawning(t *testing.T) {
 	if third.Replayed || third.Round != 2 || h.spawns != 2 {
 		t.Errorf("revised notes: replayed=%v round=%d spawns=%d", third.Replayed, third.Round, h.spawns)
 	}
+
+	// A replay of the second round appends nothing to the review history.
+	before := h.workflow(t)
+	if len(before.History) != 1 || before.History[0].Round != 1 || before.History[0].Review != first.Review {
+		t.Fatalf("history after two rounds = %+v", before.History)
+	}
+	if again, err := h.svc.Review(context.Background(), h.request(tip, "revised notes")); err != nil || !again.Replayed {
+		t.Fatalf("second replay = %+v, %v", again, err)
+	}
+	if after := h.workflow(t); len(after.History) != 1 || after.Round != 2 || after.LastReview != before.LastReview {
+		t.Errorf("replay changed the stored workflow: %+v", after)
+	}
+}
+
+// workflow loads the stored record for the harness repository's feature
+// branch.
+func (h *harness) workflow(t *testing.T) state.Workflow {
+	t.Helper()
+	st, err := state.NewStore(h.store.Path()).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := gitrepo.Open(context.Background(), h.repo.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, ok := st.Get(gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature"))
+	if !ok {
+		t.Fatal("workflow not stored")
+	}
+	return wf
+}
+
+// Each later round quotes the retained verdicts of earlier rounds, oldest
+// first, with the previous round taken from the replay copy; once more
+// rounds exist than the ledger keeps, the oldest are evicted and disclosed.
+func TestLaterRoundsQuoteRetainedVerdictsAndEvictOldest(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	var results []*Result
+	for i := 1; i <= 5; i++ {
+		h.reviewer.reviewText = fmt.Sprintf("Verdict of round %d: sentinel-%d.", i, i)
+		res, err := h.svc.Review(context.Background(), h.request(tip, fmt.Sprintf("notes %d", i)))
+		if err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		results = append(results, res)
+	}
+	quote := func(round int) string {
+		return fmt.Sprintf("Round %d, commit %s, base %s. The verdict is exactly the text between <<<ROUND %d REVIEW>>> and <<<END ROUND %d REVIEW>>>.\n<<<ROUND %d REVIEW>>>\n%s\n<<<END ROUND %d REVIEW>>>\n",
+			round, tip, results[0].Base, round, round, round, results[round-1].Review, round)
+	}
+	instr := h.reviewer.instructions
+	if strings.Contains(instr[0], "Earlier rounds") {
+		t.Error("round one quotes history")
+	}
+	if !strings.Contains(instr[1], quote(1)) || strings.Contains(instr[1], "not retained") {
+		t.Errorf("round two prompt:\n%s", instr[1])
+	}
+	if !strings.Contains(instr[3], quote(1)) || !strings.Contains(instr[3], quote(2)) || !strings.Contains(instr[3], quote(3)) || strings.Contains(instr[3], "not retained") {
+		t.Errorf("round four prompt should quote rounds one to three:\n%s", instr[3])
+	}
+	four := instr[4]
+	if strings.Contains(four, "sentinel-1") || !strings.Contains(four, quote(2)) || !strings.Contains(four, quote(3)) || !strings.Contains(four, quote(4)) ||
+		!strings.Contains(four, "- Rounds 1 to 1 are not retained; the current branch notes carry the disposition of their findings.\n") {
+		t.Errorf("round five prompt should quote rounds two to four and disclose round one:\n%s", four)
+	}
+	if strings.Index(four, "<<<ROUND 2 REVIEW>>>") > strings.Index(four, "<<<ROUND 3 REVIEW>>>") || strings.Index(four, "<<<ROUND 3 REVIEW>>>") > strings.Index(four, "<<<ROUND 4 REVIEW>>>") {
+		t.Error("history is not chronological")
+	}
+
+	wf := h.workflow(t)
+	if wf.Round != 5 || wf.LastReview != results[4].Review || len(wf.History) != 2 ||
+		wf.History[0].Round != 3 || wf.History[0].Review != results[2].Review || wf.History[1].Round != 4 || wf.History[1].Review != results[3].Review ||
+		wf.History[0].Commit != tip || wf.History[0].Base != results[0].Base {
+		t.Errorf("persisted ledger after five rounds = %+v", wf)
+	}
+}
+
+// A previous verdict over the per-record bound is quoted as a placeholder
+// and persisted as one, never truncated.
+func TestOversizedVerdictIsRetainedAsPlaceholder(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	h.reviewer.reviewText = strings.Repeat("v", state.MaxHistoryRecordBytes+1)
+	if _, err := h.svc.Review(context.Background(), h.request(tip, "one")); err != nil {
+		t.Fatal(err)
+	}
+	h.reviewer.reviewText = "short"
+	if _, err := h.svc.Review(context.Background(), h.request(tip, "two")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Review(context.Background(), h.request(tip, "three")); err != nil {
+		t.Fatal(err)
+	}
+	want := "Round 1, commit " + tip + ", base "
+	if instr := h.reviewer.instructions[1]; !strings.Contains(instr, want) || !strings.Contains(instr, "exceeded the size limit") || strings.Contains(instr, "vvvv") {
+		t.Errorf("round two prompt should name round one as omitted:\n%s", instr)
+	}
+	if instr := h.reviewer.instructions[2]; !strings.Contains(instr, "exceeded the size limit") || !strings.Contains(instr, "<<<ROUND 2 REVIEW>>>\nshort\n") {
+		t.Errorf("round three prompt:\n%s", instr)
+	}
+	wf := h.workflow(t)
+	if len(wf.History) != 2 || wf.History[0].Omitted != state.OmittedTooLarge || wf.History[0].Review != "" || wf.History[1].Review != "short" {
+		t.Errorf("persisted history = %+v", wf.History)
+	}
+}
+
+// fillStateTo adds a filler workflow so the saved state file is exactly
+// spare bytes under the size limit. The filler is a complete record.
+func fillStateTo(t *testing.T, store *state.Store, spare int) {
+	t.Helper()
+	oid := strings.Repeat("f", 40)
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := 1 << 10
+	filler := state.Workflow{ThreadID: "thr_filler", LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 1, LastReview: strings.Repeat("x", probe)}
+	st.Put("filler", filler)
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler.LastReview = strings.Repeat("x", probe+state.MaxStateFileSize-spare-int(info.Size()))
+	st.Put("filler", filler)
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	info, _ = os.Stat(store.Path())
+	if got := state.MaxStateFileSize - int(info.Size()); got != spare {
+		t.Fatalf("state file is %d bytes under the limit, want %d", got, spare)
+	}
+}
+
+// Under size pressure the review history yields before the completed
+// review is lost: first this workflow's, then every workflow's. With no
+// history to give up, the save fails as it always has and the previous
+// state stays intact.
+func TestFullStateFileEvictsHistoryBeforeFailing(t *testing.T) {
+	// Records small enough that two of them plus a short newest review
+	// stay within the aggregate bound, so nothing is evicted by retention
+	// itself and only size pressure can shrink the ledger.
+	big := strings.Repeat("r", 20<<10)
+	seed := func(t *testing.T) (*harness, string, string) {
+		t.Helper()
+		h := newHarness(t)
+		tip := h.repo.git("rev-parse", "HEAD")
+		if _, err := h.svc.Review(context.Background(), h.request(tip, "one")); err != nil {
+			t.Fatal(err)
+		}
+		repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
+		return h, tip, gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
+	}
+	load := func(t *testing.T, h *harness) *state.State {
+		t.Helper()
+		st, err := h.store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	t.Run("own history", func(t *testing.T) {
+		h, tip, key := seed(t)
+		st := load(t, h)
+		wf, _ := st.Get(key)
+		// Two rounds of large verdicts: the next round pushes the replay
+		// copy into a 40 KiB ledger, growing the file past the spare.
+		wf.Round, wf.LastReview = 2, big
+		wf.History = []state.HistoryRecord{{Round: 1, Commit: tip, Base: wf.LastBase, Review: big}}
+		st.Put(key, wf)
+		if err := h.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		fillStateTo(t, h.store, 64)
+
+		h.reviewer.reviewText = "round three verdict"
+		res, err := h.svc.Review(context.Background(), h.request(tip, "three"))
+		if err != nil {
+			t.Fatalf("review should succeed by evicting history: %v", err)
+		}
+		after := h.workflow(t)
+		if after.Round != 3 || after.LastReview != res.Review || len(after.History) != 0 {
+			t.Errorf("stored workflow = %+v", after)
+		}
+		if filler, ok := load(t, h).Get("filler"); !ok || filler.Round != 1 || len(filler.LastReview) < 1<<10 {
+			t.Errorf("filler workflow damaged: round %d review %d bytes", filler.Round, len(filler.LastReview))
+		}
+	})
+
+	t.Run("other workflow's history", func(t *testing.T) {
+		h, tip, _ := seed(t)
+		st := load(t, h)
+		oid := strings.Repeat("e", 40)
+		other := state.Workflow{ThreadID: "thr_other", LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 3, LastReview: "small",
+			History: []state.HistoryRecord{{Round: 1, Commit: oid, Base: oid, Review: big}, {Round: 2, Commit: oid, Base: oid, Review: big}}}
+		st.Put("other", other)
+		if err := h.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		fillStateTo(t, h.store, 64)
+
+		// Larger than the spare even after this workflow's own history goes.
+		h.reviewer.reviewText = strings.Repeat("t", 4<<10)
+		res, err := h.svc.Review(context.Background(), h.request(tip, "two"))
+		if err != nil {
+			t.Fatalf("review should succeed by evicting the other workflow's history: %v", err)
+		}
+		after := load(t, h)
+		if got, _ := after.Get("other"); got.Round != 3 || got.LastReview != "small" || len(got.History) != 0 || got.ThreadID != "thr_other" {
+			t.Errorf("other workflow = %+v, want its replay record intact and history cleared", got)
+		}
+		if mine := h.workflow(t); mine.Round != 2 || mine.LastReview != res.Review || len(mine.History) != 0 {
+			t.Errorf("stored workflow = %+v", mine)
+		}
+	})
+
+	t.Run("no history to evict", func(t *testing.T) {
+		h, tip, _ := seed(t)
+		fillStateTo(t, h.store, 64)
+		before := h.workflow(t)
+
+		h.reviewer.reviewText = strings.Repeat("n", 4<<10)
+		_, err := h.svc.Review(context.Background(), h.request(tip, "two"))
+		if !errors.Is(err, state.ErrTooLarge) || !strings.Contains(err.Error(), "state was not saved") {
+			t.Fatalf("error = %v, want ErrTooLarge after the review completed", err)
+		}
+		if after := h.workflow(t); after.Round != before.Round || after.LastReview != before.LastReview {
+			t.Errorf("failed save changed the stored workflow: %+v", after)
+		}
+	})
 }
 
 func TestSecondRoundResumesThreadAndNamesPreviousTip(t *testing.T) {
@@ -341,8 +581,12 @@ func TestRewrittenHistoryIsReportedToReviewer(t *testing.T) {
 	if _, err := h.svc.Review(context.Background(), h.request(amended, "r2")); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.reviewer.instructions[1], "history was rewritten") {
-		t.Error("rewritten history not reported in instructions")
+	if instr := h.reviewer.instructions[1]; !strings.Contains(instr, "history was rewritten") ||
+		!strings.Contains(instr, "History was rewritten since these rounds") || !strings.Contains(instr, "<<<ROUND 1 REVIEW>>>") {
+		t.Errorf("rewritten history not reported with the retained verdict:\n%s", instr)
+	}
+	if wf := h.workflow(t); len(wf.History) != 1 || wf.History[0].Round != 1 || wf.History[0].Commit != first {
+		t.Errorf("history not retained across the rewrite: %+v", wf.History)
 	}
 }
 
@@ -601,7 +845,7 @@ func TestMovedMergeBaseIsANewRound(t *testing.T) {
 
 func TestIncompleteStoredWorkflowFailsClosed(t *testing.T) {
 	complete := func(tip, hash string) state.Workflow {
-		return state.Workflow{ThreadID: "thr_1", LastCommit: tip, LastBase: "b", LastRequestHash: hash, Round: 1, LastReview: "prior review"}
+		return state.Workflow{ThreadID: "thr_1", LastCommit: tip, LastBase: strings.Repeat("b", 40), LastRequestHash: hash, Round: 1, LastReview: "prior review"}
 	}
 	cases := map[string]func(w *state.Workflow){
 		"thread_id":         func(w *state.Workflow) { w.ThreadID = "" },
@@ -610,6 +854,14 @@ func TestIncompleteStoredWorkflowFailsClosed(t *testing.T) {
 		"last_request_hash": func(w *state.Workflow) { w.LastRequestHash = "" },
 		"last_review":       func(w *state.Workflow) { w.LastReview = "" },
 		"round":             func(w *state.Workflow) { w.Round = 0 },
+		"last_base id":      func(w *state.Workflow) { w.LastBase = "b" },
+		"history round": func(w *state.Workflow) {
+			w.History = []state.HistoryRecord{{Round: 5, Commit: w.LastCommit, Base: w.LastBase, Review: "prior review"}}
+		},
+		"history id": func(w *state.Workflow) {
+			w.Round = 2
+			w.History = []state.HistoryRecord{{Round: 1, Commit: "thr_1", Base: w.LastBase, Review: "prior review"}}
+		},
 	}
 	for field, damage := range cases {
 		t.Run(field, func(t *testing.T) {
@@ -741,7 +993,7 @@ func TestUnincrementableRoundFailsClosed(t *testing.T) {
 	repo, _ := gitrepo.Open(context.Background(), h.repo.dir)
 	key := gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
 	st, _ := h.store.Load()
-	st.Put(key, state.Workflow{ThreadID: "thr_1", LastCommit: tip, LastBase: "b", LastRequestHash: "h", Round: math.MaxInt, LastReview: "r"})
+	st.Put(key, state.Workflow{ThreadID: "thr_1", LastCommit: tip, LastBase: strings.Repeat("b", 40), LastRequestHash: "h", Round: math.MaxInt, LastReview: "r"})
 	if err := h.store.Save(st); err != nil {
 		t.Fatal(err)
 	}

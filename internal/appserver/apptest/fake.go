@@ -21,7 +21,9 @@ const (
 	// ScenarioEnv selects the fake's behavior.
 	ScenarioEnv = "COUNTERPOINT_FAKE_APPSERVER"
 	// StateEnv names a file where issued thread ids persist across runs;
-	// received interrupts are appended to StateEnv + ".events".
+	// received interrupts are appended to StateEnv + ".events", and the
+	// instructions of the latest review/start are written to
+	// StateEnv + ".instructions" so tests can check the exact prompt.
 	StateEnv = "COUNTERPOINT_FAKE_STATE"
 
 	// Bounds mirrored from the client so scenarios can exceed them.
@@ -624,7 +626,17 @@ func (f *fakeServer) handleReviewStart(env *envelope) {
 		return
 	}
 	f.respond(env.ID, map[string]any{"reviewThreadId": reviewThreadID, "turn": turn})
+	f.recordInstructions(p.Target.Instructions)
 	go f.runTurn(threadID, turnID, p.Target.Instructions, interrupt)
+}
+
+// recordInstructions writes the latest review instructions beside the
+// state file, replacing the previous round's.
+func (f *fakeServer) recordInstructions(instructions string) {
+	if f.statePath == "" {
+		return
+	}
+	_ = os.WriteFile(f.statePath+".instructions", []byte(instructions), 0o600)
 }
 
 func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt chan struct{}) {

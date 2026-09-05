@@ -231,6 +231,12 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		if missing := incompleteWorkflowField(wf); missing != "" {
 			return nil, fmt.Errorf("%w: workflow %s in %s is missing %s", ErrStateInvalid, key, s.store.Path(), missing)
 		}
+		// The review history is quoted into the prompt, so a record that
+		// breaks the ledger's invariants is refused before any value is
+		// interpolated. The description never echoes stored text.
+		if bad := wf.InvalidHistory(); bad != "" {
+			return nil, fmt.Errorf("%w: workflow %s in %s: %s", ErrStateInvalid, key, s.store.Path(), bad)
+		}
 		// The next round number must be representable; untrusted state
 		// could hold a value whose increment would wrap and persist a
 		// corrupted record after a paid review.
@@ -266,6 +272,15 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		Round: round, Worktree: repo.Worktree, BranchRef: branch.Ref, Commit: target.Commit,
 		Base: target.Base, PrimaryName: target.PrimaryName, PrimaryRef: target.PrimaryRef,
 		PreviousTip: wf.LastCommit, HistoryRewritten: target.HistoryRewritten, BranchNotes: req.BranchNotes,
+	}
+	// The reviewer starts every round without memory (issue #19), so the
+	// retained verdicts and the previous round's review are quoted into
+	// the prompt, oldest first, with the evicted rounds disclosed by count.
+	var previous state.HistoryRecord
+	if known {
+		previous = state.NewHistoryRecord(wf.Round, wf.LastCommit, wf.LastBase, wf.LastReview)
+		prompt.History = append(append([]state.HistoryRecord{}, wf.History...), previous)
+		prompt.OmittedRounds = prompt.History[0].Round - 1
 	}
 
 	// A build-capable review runs in a disposable checkout of the commit,
@@ -398,6 +413,10 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		}
 	}
 
+	var history []state.HistoryRecord
+	if known {
+		history = state.RetainHistory(wf.History, previous, rev.Text)
+	}
 	st.Put(key, state.Workflow{
 		ThreadID:        thread.ID,
 		LastCommit:      target.Commit,
@@ -406,8 +425,9 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		Round:           round,
 		LastReview:      rev.Text,
 		LastWarnings:    rev.Warnings,
+		History:         history,
 	})
-	if err := s.store.Save(st); err != nil {
+	if err := s.saveEvictingHistory(st, key, requestID); err != nil {
 		return nil, fmt.Errorf("review completed but state was not saved: %w", err)
 	}
 	s.log.Info("review turn completed", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
@@ -419,6 +439,44 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	}, nil
 }
 
+// saveEvictingHistory saves the state, giving up review history under size
+// pressure so that history, this workflow's or any other's, never leaves a
+// completed review unsaved. On ErrTooLarge it clears this workflow's
+// history and retries; if the file is still too large it clears every
+// workflow's history and retries once more. Replay fields are never
+// touched, so no workflow loses its completed-review record: history is
+// derived convenience data, which is why evicting another workflow's copy
+// stays within the rule that recovery never deletes another workflow's
+// active state. The caller holds the review lock.
+func (s *Service) saveEvictingHistory(st *state.State, key, requestID string) error {
+	err := s.store.Save(st)
+	if !errors.Is(err, state.ErrTooLarge) {
+		return err
+	}
+	if wf, ok := st.Get(key); ok && len(wf.History) > 0 {
+		wf.History = nil
+		st.Put(key, wf)
+		s.log.Warn("state file is full; review history evicted", "request", requestID, "workflow", key)
+		if err = s.store.Save(st); !errors.Is(err, state.ErrTooLarge) {
+			return err
+		}
+	}
+	cleared := 0
+	for k, wf := range st.Workflows {
+		if len(wf.History) == 0 {
+			continue
+		}
+		wf.History = nil
+		st.Put(k, wf)
+		cleared++
+		s.log.Warn("state file is full; review history evicted", "request", requestID, "workflow", k)
+	}
+	if cleared == 0 {
+		return err
+	}
+	return s.store.Save(st)
+}
+
 // incompleteWorkflowField names the first missing invariant of a stored
 // completed-review record, or "" when the record is complete. Values are
 // never echoed: they are untrusted state-file content.
@@ -426,10 +484,10 @@ func incompleteWorkflowField(wf state.Workflow) string {
 	switch {
 	case wf.ThreadID == "":
 		return "thread_id"
-	case wf.LastCommit == "":
-		return "last_commit"
-	case wf.LastBase == "":
-		return "last_base"
+	case !state.IsObjectID(wf.LastCommit):
+		return "a full object id in last_commit"
+	case !state.IsObjectID(wf.LastBase):
+		return "a full object id in last_base"
 	case wf.LastRequestHash == "":
 		return "last_request_hash"
 	case wf.LastReview == "":
