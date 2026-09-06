@@ -158,6 +158,13 @@ deleting directories under the scratch root is safe between reviews.
 Prerequisites at review time: a clean worktree checked out at the tip of a
 non-primary branch, and a locally authenticated Codex CLI.
 
+To adopt Counterpoint in a project, give the authoring agent the review
+workflow in that project's `CLAUDE.md` or `AGENTS.md`.
+[WORKFLOW-SAMPLE.md](WORKFLOW-SAMPLE.md) is template language for that: the
+roles, the branch-and-review loop up to the human push gate, how to respond
+to findings, how to submit each round through the tool, and what branch
+notes must contain. Copy it in and edit the placeholders.
+
 ## Operational notes
 
 - Counterpoint names its threads `Counterpoint review: <repository> <branch>`
