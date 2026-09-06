@@ -123,7 +123,8 @@ make register
 `make install` builds a version-stamped binary into `GOBIN`, or `GOPATH/bin`
 when `GOBIN` is unset; make sure that directory is on `PATH`. `make register`
 runs `claude mcp add -s user counterpoint -- counterpoint` when the name is
-not yet registered and does nothing otherwise, so it is safe to repeat. The
+not yet registered at user scope and does nothing otherwise, so it is safe to
+repeat. The
 registration stores only the command name, resolved on `PATH` each session,
 so it is a once-per-machine step that survives later installs. If that
 directory cannot be on `PATH`, register the absolute path by hand instead; the
