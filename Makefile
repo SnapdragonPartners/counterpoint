@@ -1,4 +1,4 @@
-.PHONY: build install test lint vet fmt fmt-check check install-lint install-hooks schema clean
+.PHONY: build install register test lint vet fmt fmt-check check install-lint install-hooks schema clean
 
 GOLANGCI_LINT_VERSION := v1.64.8
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -21,6 +21,30 @@ build:
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/counterpoint
 	@echo "Installed $(VERSION) to $$(go list -f '{{.Target}}' ./cmd/counterpoint)"
+
+# Registers the installed binary with Claude Code as a user-scope stdio MCP
+# server. The registration stores the command name, which Claude Code resolves
+# on PATH at each session start, so this is a once-per-machine step that
+# survives later installs; it is kept out of install, which CI and contributors
+# without Claude Code run. Skipped when the name is already registered:
+# `claude mcp get` exits 0 then and 1 otherwise (Claude Code 2.1.261). Refuses
+# to register a command that does not resolve, which would leave a server
+# Claude Code cannot start.
+register:
+	@if ! command -v claude >/dev/null 2>&1; then \
+		echo "claude not found on PATH; install Claude Code first" >&2; exit 1; \
+	fi; \
+	if ! command -v counterpoint >/dev/null 2>&1; then \
+		echo "counterpoint not found on PATH; run make install and put its directory on PATH, or register the absolute path:" >&2; \
+		echo "  claude mcp add -s user counterpoint -- $$(go list -f '{{.Target}}' ./cmd/counterpoint)" >&2; \
+		exit 1; \
+	fi; \
+	if claude mcp get counterpoint >/dev/null 2>&1; then \
+		echo "counterpoint is already registered with Claude Code; nothing to do"; \
+	else \
+		claude mcp add -s user counterpoint -- counterpoint \
+			&& echo "registered counterpoint with Claude Code at user scope; restart Claude Code to pick it up"; \
+	fi
 
 test:
 	go test -race -cover ./...
