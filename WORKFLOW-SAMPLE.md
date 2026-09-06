@@ -3,9 +3,10 @@
 This is template language for the `CLAUDE.md` (or `AGENTS.md`) of a project
 that uses Counterpoint. Copy the sections below into that file and edit them:
 replace `OWNER` with the name of the human who authorizes pushes and merges,
-replace the verification command with the project's own, and delete anything
-that does not apply. The wording assumes Claude Code as the authoring agent
-and Codex as the reviewer; adjust the names if your setup differs.
+replace `VERIFY` with the project's verification command (for example
+`make check` or `npm test`), and delete anything that does not apply. The
+wording assumes Claude Code as the authoring agent and Codex as the reviewer;
+adjust the names if your setup differs.
 
 Everything from the next heading on is the template.
 
@@ -30,7 +31,7 @@ indefinitely.
 1. Work on a feature or fix branch from the repository's primary branch.
    Never develop directly on the primary branch.
 2. Make the scoped change and run verification proportionate to its risk
-   (for this project: `make check`).
+   (`VERIFY`).
 3. Commit locally. Never bypass hooks with `--no-verify`; fix failures.
 4. Write branch notes for Codex and submit the exact local commit for review.
 5. Address every blocking finding with a fix or a reasoned response. Commit
