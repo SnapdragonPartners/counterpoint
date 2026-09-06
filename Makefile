@@ -30,7 +30,8 @@ install:
 # user scope: `claude mcp get` has no scope filter and reports whichever scope
 # wins, so its "Scope:" line is checked rather than its exit status, and a
 # local- or project-scope server of the same name does not mask a missing
-# user-scope one (Claude Code 2.1.261). A local-scope server shadowing an
+# user-scope one (Claude Code 2.1.261 prints "Scope: User config"; the match
+# is case-insensitive on the scope word to tolerate wording changes). A local-scope server shadowing an
 # existing user-scope one makes the add fail loudly with "already exists in
 # user config", never a silent overwrite. Refuses to register a command that
 # does not resolve, which would leave a server Claude Code cannot start.
@@ -43,7 +44,7 @@ register:
 		echo "  claude mcp add -s user counterpoint -- $$(go list -f '{{.Target}}' ./cmd/counterpoint)" >&2; \
 		exit 1; \
 	fi; \
-	if claude mcp get counterpoint 2>/dev/null | grep -q '^ *Scope: User config'; then \
+	if claude mcp get counterpoint 2>/dev/null | grep -qi '^ *scope: *user'; then \
 		echo "counterpoint is already registered with Claude Code at user scope; nothing to do"; \
 	else \
 		claude mcp add -s user counterpoint -- counterpoint \
