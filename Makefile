@@ -1,4 +1,4 @@
-.PHONY: build install test lint vet fmt fmt-check check install-lint install-hooks schema clean
+.PHONY: build install register test lint vet fmt fmt-check check install-lint install-hooks schema clean
 
 GOLANGCI_LINT_VERSION := v1.64.8
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -21,6 +21,35 @@ build:
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/counterpoint
 	@echo "Installed $(VERSION) to $$(go list -f '{{.Target}}' ./cmd/counterpoint)"
+
+# Registers the installed binary with Claude Code as a user-scope stdio MCP
+# server. The registration stores the command name, which Claude Code resolves
+# on PATH at each session start, so this is a once-per-machine step that
+# survives later installs; it is kept out of install, which CI and contributors
+# without Claude Code run. Skipped only when the name is already registered at
+# user scope: `claude mcp get` has no scope filter and reports whichever scope
+# wins, so its "Scope:" line is checked rather than its exit status, and a
+# local- or project-scope server of the same name does not mask a missing
+# user-scope one (Claude Code 2.1.261 prints "Scope: User config"; the match
+# is case-insensitive on the scope word to tolerate wording changes). A local-scope server shadowing an
+# existing user-scope one makes the add fail loudly with "already exists in
+# user config", never a silent overwrite. Refuses to register a command that
+# does not resolve, which would leave a server Claude Code cannot start.
+register:
+	@if ! command -v claude >/dev/null 2>&1; then \
+		echo "claude not found on PATH; install Claude Code first" >&2; exit 1; \
+	fi; \
+	if ! command -v counterpoint >/dev/null 2>&1; then \
+		echo "counterpoint not found on PATH; run make install and put its directory on PATH, or register the absolute path:" >&2; \
+		echo "  claude mcp add -s user counterpoint -- $$(go list -f '{{.Target}}' ./cmd/counterpoint)" >&2; \
+		exit 1; \
+	fi; \
+	if claude mcp get counterpoint 2>/dev/null | grep -qi '^ *scope: *user'; then \
+		echo "counterpoint is already registered with Claude Code at user scope; nothing to do"; \
+	else \
+		claude mcp add -s user counterpoint -- counterpoint \
+			&& echo "registered counterpoint with Claude Code at user scope; restart Claude Code to pick it up"; \
+	fi
 
 test:
 	go test -race -cover ./...

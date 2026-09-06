@@ -117,16 +117,22 @@ user scope, so it is available in every project:
 
 ```bash
 make install
-claude mcp add -s user counterpoint -- counterpoint
+make register
 ```
 
 `make install` builds a version-stamped binary into `GOBIN`, or `GOPATH/bin`
-when `GOBIN` is unset; make sure that directory is on `PATH`, or register the
-absolute path instead. Registering the installed binary rather than
-`bin/counterpoint` keeps the tool stable while the repository is being
-developed: `make build` produces the build under test, and `make install`
-promotes it. MCP servers start with the client session, so restart Claude
-Code after installing a new version.
+when `GOBIN` is unset; make sure that directory is on `PATH`. `make register`
+runs `claude mcp add -s user counterpoint -- counterpoint` when the name is
+not yet registered at user scope and does nothing otherwise, so it is safe to
+repeat. The
+registration stores only the command name, resolved on `PATH` each session,
+so it is a once-per-machine step that survives later installs. If that
+directory cannot be on `PATH`, register the absolute path by hand instead; the
+target prints the command when `counterpoint` does not resolve. Registering
+the installed binary rather than `bin/counterpoint` keeps the tool stable
+while the repository is being developed: `make build` produces the build
+under test, and `make install` promotes it. MCP servers start with the client
+session, so restart Claude Code after installing a new version.
 
 Counterpoint exposes one tool, `review`, taking `repo`, `branch`, `commit`,
 `branch_notes`, and an optional `build` flag. It returns the canonical
@@ -171,7 +177,8 @@ non-primary branch, and a locally authenticated Codex CLI.
 ```bash
 make check     # gofmt check, go vet, golangci-lint, go test -race; what CI runs
 make build     # bin/counterpoint, the build under test
-make install   # versioned binary into GOBIN or GOPATH/bin; register that with your MCP client
+make install   # versioned binary into GOBIN or GOPATH/bin
+make register  # register the installed binary with Claude Code once per machine
 make schema    # regenerate the codex app-server JSON schema into .schema/
 make install-hooks  # pre-commit hook that runs make check
 ```
