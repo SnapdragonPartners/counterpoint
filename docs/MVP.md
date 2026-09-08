@@ -526,8 +526,10 @@ locks:
   the entire review: from the first state read through validation, the
   disposable checkout, the child's lifetime, and the final state write,
   until after the child has exited. Acquisition waits two seconds and then
-  fails with "another review is in progress", naming the branch, rather
-  than queueing behind a full review.
+  fails with "another review of branch ... is in progress" rather than
+  queueing behind a full review; the error tells the calling agent to wait
+  and retry, and that a retry with the same request after the running round
+  ends is replayed without a new round.
 - The **state lock**, beside the state file, guards the state file itself
   and is held only around each read or read-modify-write, which runs no Git
   or Codex: once at the start to copy the workflow's record, and once at the
@@ -536,7 +538,9 @@ locks:
   save preserves records other reviews wrote meanwhile. The start wait is
   two seconds; the final save waits up to thirty seconds, bounded by the
   request context, because the holder may be another review finishing at
-  the same moment. Contention fails with "the state file is busy".
+  the same moment. Contention fails with "the state file is busy", telling
+  the caller to retry in ten seconds and, if it persists, to restart
+  sessions still running an older Counterpoint.
 
 The record copied at the start stays current through the review because the
 workflow lock excludes every other round of that workflow. At the final save

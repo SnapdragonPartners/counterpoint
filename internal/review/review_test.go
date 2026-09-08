@@ -810,8 +810,9 @@ func TestWorkflowLockContentionFailsClearly(t *testing.T) {
 
 	tip := h.repo.git("rev-parse", "HEAD")
 	_, err = h.svc.Review(context.Background(), h.request(tip, "r1"))
-	if !errors.Is(err, state.ErrLocked) || !strings.Contains(err.Error(), "branch refs/heads/feature") {
-		t.Fatalf("error = %v, want ErrLocked naming the branch", err)
+	if !errors.Is(err, state.ErrLocked) || !strings.Contains(err.Error(), "another review of branch refs/heads/feature is in progress") ||
+		!strings.Contains(err.Error(), "wait for it to finish and retry") || !strings.Contains(err.Error(), "returns that verdict without a new round") {
+		t.Fatalf("error = %v, want ErrLocked naming the branch and telling the caller what to do", err)
 	}
 	if h.spawns != 0 {
 		t.Error("reviewer spawned while the workflow lock was held elsewhere")
@@ -830,8 +831,8 @@ func TestStateLockContentionFailsClearly(t *testing.T) {
 
 	tip := h.repo.git("rev-parse", "HEAD")
 	_, err = h.svc.Review(context.Background(), h.request(tip, "r1"))
-	if !errors.Is(err, state.ErrLocked) || !strings.Contains(err.Error(), "is busy") {
-		t.Fatalf("error = %v, want ErrLocked saying the state file is busy", err)
+	if !errors.Is(err, state.ErrLocked) || !strings.Contains(err.Error(), "is busy") || !strings.Contains(err.Error(), "retry in ten seconds") {
+		t.Fatalf("error = %v, want ErrLocked saying the state file is busy and when to retry", err)
 	}
 	if h.spawns != 0 {
 		t.Error("reviewer spawned while the state lock was held elsewhere")

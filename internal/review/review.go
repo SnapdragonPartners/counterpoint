@@ -57,6 +57,20 @@ var (
 const threadRecoveryHint = "if the thread is open in another Codex process, such as the Codex app, archive it there and retry " +
 	"so Counterpoint can unarchive and take it over; if the thread no longer exists, remove the workflow from the state file"
 
+// workflowBusyHint tells the calling agent what to do when this branch is
+// already under review. A retry with the same commit and notes after the
+// running round finishes is replayed from state without a new turn, which
+// is the right recovery when the caller's own earlier call was cancelled.
+const workflowBusyHint = "a review round takes minutes; wait for it to finish and retry, checking no more often than once a minute. " +
+	"If you submitted this review yourself and the call was cancelled, that round is still running and its verdict will be recorded; " +
+	"retrying with the same commit and branch notes after it finishes returns that verdict without a new round"
+
+// stateBusyHint tells the calling agent what to do when the state file is
+// locked. The lock is held for moments, so contention is either a
+// coincidence or an older Counterpoint holding it for a whole review.
+const stateBusyHint = "another Counterpoint process is reading or writing it, which takes moments; retry in ten seconds. " +
+	"If this persists, an older Counterpoint is holding the file for a whole review: restart every Claude Code session after installing a new version"
+
 // requestIDKey carries the request correlation id in a context.
 type requestIDKey struct{}
 
@@ -216,7 +230,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	lock, err := state.AcquireLock(ctx, s.store.WorkflowLockPath(key), state.LockWait)
 	if err != nil {
 		if errors.Is(err, state.ErrLocked) {
-			return nil, fmt.Errorf("branch %s: %w", branch.Ref, err)
+			return nil, fmt.Errorf("another review of branch %s is in progress (%w); %s", branch.Ref, err, workflowBusyHint)
 		}
 		return nil, err
 	}
@@ -474,7 +488,7 @@ func (s *Service) acquireStateLock(ctx context.Context, wait time.Duration) (*st
 	lock, err := state.AcquireLock(ctx, s.store.LockPath(), wait)
 	if err != nil {
 		if errors.Is(err, state.ErrLocked) {
-			return nil, fmt.Errorf("state file %s is busy: %w", s.store.Path(), err)
+			return nil, fmt.Errorf("the state file %s is busy (%w); %s", s.store.Path(), err, stateBusyHint)
 		}
 		return nil, err
 	}

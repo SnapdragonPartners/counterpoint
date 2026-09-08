@@ -28,8 +28,9 @@ const (
 	lockPollInterval = 100 * time.Millisecond
 )
 
-// ErrLocked reports that another Counterpoint process holds the review lock.
-var ErrLocked = errors.New("another review is in progress")
+// ErrLocked reports that another process holds an advisory lock. Callers
+// wrap it with what the lock protects and what to do about it.
+var ErrLocked = errors.New("lock held by another process")
 
 // Lock is a held advisory file lock. It is released by Release, and by the
 // operating system if the process exits.

@@ -192,11 +192,14 @@ before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
 
 - Reviews of different repositories or branches run at the same time, each
   in its own Counterpoint process with its own Codex session. A second
-  review of the same branch fails with "another review is in progress"
-  while the first runs. "The state file is busy" means another process is
-  reading or writing the shared state file at that instant, which takes
-  milliseconds, or an older Counterpoint is holding it for a whole review;
-  restart Claude Code sessions after installing a new version.
+  review of the same branch fails while the first runs with "another review
+  of branch ... is in progress" and tells the agent to wait and retry, and
+  that a retry with the same commit and notes after the running round ends
+  returns its verdict without a new round. "The state file is busy" means
+  another process is reading or writing the shared state file at that
+  instant, which takes moments, or an older Counterpoint is holding it for
+  a whole review; the error says to retry in ten seconds and to restart
+  Claude Code sessions after installing a new version.
 - Counterpoint names its threads `Counterpoint review: <repository> <branch>`
   so they are easy to leave alone in the Codex app. Only one process can hold
   a thread at a time. If the thread is open in the app, the next review fails
