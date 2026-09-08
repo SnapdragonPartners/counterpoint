@@ -2,6 +2,9 @@
 
 Design record for
 [issue 19](https://github.com/SnapdragonPartners/counterpoint/issues/19).
+
+Status: Accepted (Codex and DR, 2026-09-05; shipped in PR 20)
+
 The diagnosis and the design were settled between DR, Claude, and Codex on
 2026-09-05 before any code was written; the implementation on the same
 branch follows this document. Once it lands, the contract lives in

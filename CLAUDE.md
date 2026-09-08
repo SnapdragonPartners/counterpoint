@@ -178,6 +178,10 @@ the author's claims are correct.
   decision that cuts across issues, such as the threat model or
   documentation authority, as an ADR in `docs/adr/` (see its `README.md`
   for the lifecycle), and cite it rather than re-deriving it.
+- ADRs and design records in `docs/design/` carry a status line naming who
+  accepted them and when. A record binds later review rounds only once
+  that line records both Codex and DR, in a commit an earlier round
+  approved; until then it is a proposal under review.
 
 ## Development and verification
 

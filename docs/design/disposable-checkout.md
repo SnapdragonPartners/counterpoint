@@ -2,6 +2,9 @@
 
 Design record for
 [issue 12](https://github.com/SnapdragonPartners/counterpoint/issues/12).
+
+Status: Accepted (Codex and DR, 2026-09-04; shipped in PR 18)
+
 This document was reviewed and accepted before any code was written, and
 the implementation on the same branch follows it. The current contract lives
 in `docs/MVP.md` under "Build-capable reviews" and "Sandbox and approvals";
