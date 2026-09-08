@@ -58,12 +58,14 @@ const threadRecoveryHint = "if the thread is open in another Codex process, such
 	"so Counterpoint can unarchive and take it over; if the thread no longer exists, remove the workflow from the state file"
 
 // workflowBusyHint tells the calling agent what to do when this branch is
-// already under review. A retry with the same commit and notes after the
-// running round finishes is replayed from state without a new turn, which
-// is the right recovery when the caller's own earlier call was cancelled.
-const workflowBusyHint = "a review round takes minutes; wait for it to finish and retry, checking no more often than once a minute. " +
-	"If you submitted this review yourself and the call was cancelled, that round is still running and its verdict will be recorded; " +
-	"retrying with the same commit and branch notes after it finishes returns that verdict without a new round"
+// already under review. The common self-inflicted case is a call the MCP
+// client moved to the background: it is still running and will deliver
+// its result, so it must not be retried. A cancelled call is different:
+// cancellation interrupts the turn and records nothing, so a retry after
+// it is a new round, and the hint promises no replay.
+const workflowBusyHint = "a review round takes minutes. " +
+	"If you submitted this review yourself and the client moved the call to the background, do not retry: it is still running and its result will be delivered when it completes. " +
+	"Otherwise wait for the running round to finish and retry, checking no more often than once a minute"
 
 // stateBusyHint tells the calling agent what to do when the state file is
 // locked. The lock is held for moments, so contention is either a

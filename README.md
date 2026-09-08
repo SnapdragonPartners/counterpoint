@@ -193,9 +193,9 @@ before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
 - Reviews of different repositories or branches run at the same time, each
   in its own Counterpoint process with its own Codex session. A second
   review of the same branch fails while the first runs with "another review
-  of branch ... is in progress" and tells the agent to wait and retry, and
-  that a retry with the same commit and notes after the running round ends
-  returns its verdict without a new round. "The state file is busy" means
+  of branch ... is in progress" and tells the agent not to retry a call the
+  client moved to the background, since it is still running, and otherwise
+  to wait for the round to finish and retry. "The state file is busy" means
   another process is reading or writing the shared state file at that
   instant, which takes moments, or an older Counterpoint is holding it for
   a whole review; the error says to retry in ten seconds and to restart

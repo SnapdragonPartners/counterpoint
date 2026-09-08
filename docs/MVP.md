@@ -527,9 +527,10 @@ locks:
   disposable checkout, the child's lifetime, and the final state write,
   until after the child has exited. Acquisition waits two seconds and then
   fails with "another review of branch ... is in progress" rather than
-  queueing behind a full review; the error tells the calling agent to wait
-  and retry, and that a retry with the same request after the running round
-  ends is replayed without a new round.
+  queueing behind a full review; the error tells the calling agent not to
+  retry a call its client moved to the background, since that round is
+  still running and will deliver its result, and otherwise to wait for the
+  round to finish and retry.
 - The **state lock**, beside the state file, guards the state file itself
   and is held only around each read or read-modify-write, which runs no Git
   or Codex: once at the start to copy the workflow's record, and once at the
