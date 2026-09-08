@@ -60,6 +60,16 @@ round's notes rather than a change. If Codex reaffirms it, stop, state both
 positions, and bring the decision to OWNER before another round. Do not
 implement a change Claude believes is wrong in order to end the loop.
 
+A finding settled by argument rather than by a change, whether Codex
+withdraws it, Claude accepts it after a further round, or OWNER decides it
+after escalation, is recorded in the repository before the next review
+round: as an architecture decision record when the resolution would apply
+beyond the current work, otherwise as a dated amendment to the governing
+design record or specification. The next round's branch notes cite that
+record by path. A resolution that exists only in conversation or in branch
+notes is not a resolution: the reviewer starts each round with only the
+last three verdicts, and the next author starts with none.
+
 ### Submitting for review
 
 - If the `counterpoint` review tool is available, call it directly with the

@@ -77,6 +77,17 @@ notes rather than a change. If Codex reaffirms it, stop, state both positions,
 and bring the decision to DR before another round. Do not implement a change
 Claude believes is wrong in order to end the loop.
 
+A finding settled by argument rather than by a change, whether Codex
+withdraws it after Claude's reasoned response, Claude accepts it after a
+further round, or DR decides it after escalation, is recorded in the
+repository before the next review round: as an ADR in `docs/adr/` when the
+resolution would apply beyond the current work, otherwise as a dated
+amendment to the governing design record or specification. The next
+round's branch notes cite that record by path. A finding settled by a
+change is recorded by the change. A resolution that exists only in
+conversation, in the review thread, or in branch notes is not a resolution:
+the reviewer's memory is three rounds and the next author's is none.
+
 ### Submitting for review
 
 Counterpoint is registered as an MCP server in Claude Code, so the review

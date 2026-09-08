@@ -13,3 +13,10 @@
   Codex, bounded reads and buffers, explicit responses to every
   server-originated request, and no edits to the reviewed repository.
 - A regression test that cannot fail for the defect it names is a finding.
+- Accepted ADRs in `docs/adr/` and the design record the branch notes cite
+  bind the review. A finding that contradicts one is out of scope unless
+  the notes say the record is being revised; in particular, ADR 0001
+  states the adversaries, and a finding that requires defending against a
+  process running as the user is out of scope. A finding settled by
+  argument in an earlier round is recorded in those documents; re-raising
+  it needs a new reason, not a restatement.
