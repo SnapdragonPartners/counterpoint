@@ -514,19 +514,49 @@ prompt paths and templates are deferred.
 
 ## Concurrency and cancellation
 
-Reviews are serialized across all Counterpoint processes with a single advisory
-file lock held for the entire review, from validation through the state write
-and the child's exit.
-Multiple MCP clients each spawn their own Counterpoint process, so a
-process-local lock is insufficient. Acquisition uses a short bounded wait and
-then fails with a clear "another review is in progress" error rather than
-queueing behind a full review. Serializing reviews for different branches is an
-accepted MVP limitation.
+Reviews are serialized per workflow, and reviews of different workflows run
+concurrently, so several projects can advance at once
+([issue 30](https://github.com/SnapdragonPartners/counterpoint/issues/30),
+designed in `docs/design/per-workflow-locks.md`). Multiple MCP clients each
+spawn their own Counterpoint process, so both locks below are advisory file
+locks:
+
+- The **workflow lock**, one file per workflow in a `locks` directory beside
+  the state file, named by a prefix of the workflow key's hash, is held for
+  the entire review: from the first state read through validation, the
+  disposable checkout, the child's lifetime, and the final state write,
+  until after the child has exited. Acquisition waits two seconds and then
+  fails with "another review of branch ... is in progress" rather than
+  queueing behind a full review; the error tells the calling agent not to
+  retry a call its client moved to the background, since that round is
+  still running and will deliver its result, and otherwise to wait for the
+  round to finish and retry.
+- The **state lock**, beside the state file, guards the state file itself
+  and is held only around each read or read-modify-write, which runs no Git
+  or Codex: once at the start to copy the workflow's record, and once at the
+  end to re-read the file, record the completed round, evict history under
+  size pressure if needed, and save atomically. Re-reading before the final
+  save preserves records other reviews wrote meanwhile. The start wait is
+  two seconds; the final save waits up to thirty seconds, bounded by the
+  request context, because the holder may be another review finishing at
+  the same moment. Contention fails with "the state file is busy", telling
+  the caller to retry in ten seconds and, if it persists, to restart
+  sessions still running an older Counterpoint.
+
+The record copied at the start stays current through the review because the
+workflow lock excludes every other round of that workflow. At the final save
+the record is reconciled with the fresh read: its history is rebuilt from
+the fresh record, so another review's size-pressure eviction is honored
+rather than resurrected; other workflows' records are carried as read; and
+a change to this workflow's replay fields means a writer bypassed the lock,
+so the save is refused rather than overwriting. Lock order is the workflow
+lock first, then the scratch directory lock, with the state lock a leaf
+that is never held while acquiring another.
 
 Two fixed phase budgets apply. Setup has sixty seconds covering the
 app-server launch, its handshake, and thread start or resume; a stall anywhere
-in setup fails the call, closes the child, and releases the lock. The review
-turn then has twenty minutes. Lock acquisition (two seconds), Git validation,
+in setup fails the call, closes the child, and releases the workflow lock.
+The review turn then has twenty minutes. Lock acquisition, Git validation,
 persistence, and cleanup (up to five seconds for the turn to interrupt and
 five for the child to exit before it is killed) are outside both budgets, so
 the budgets are not a bound on the whole call. They sit well below the MCP
@@ -624,7 +654,8 @@ Unit tests cover:
   absent and blank treated as none, an executable blob accepted, and
   rejection of a symbolic link, a directory, an oversized file, and invalid
   UTF-8 with no content echoed in the error; its delimited quoting,
-  unchanged apart from trailing newlines, before the branch notes, absence of the section when there is no file,
+  unchanged apart from trailing newlines, before the branch notes, absence
+  of the section when there is no file,
   forged delimiters defeated, and a review request whose commit carries an
   unusable file failing before the reviewer is spawned;
 - merge-base resolution against local and remote-tracking primary branches;
@@ -649,7 +680,15 @@ Unit tests cover:
   fallback;
 - `failed` and `interrupted` terminal handling;
 - turn timeout and cancellation issuing `turn/interrupt`;
-- cross-process lock acquisition, including bounded wait and clear failure; and
+- cross-process lock acquisition, including bounded wait and clear failure
+  for the workflow lock and the state lock; the state lock free during
+  setup
+  and the turn; reviews of two workflows in flight at once with both records
+  saved; a second round of the same workflow refused while the first is in
+  its turn; a foreign record written mid-review surviving the final save; a
+  change to the in-flight workflow's own record refusing the save; a
+  concurrent history eviction honored at the final save; and the final save
+  waiting out a briefly held state lock; and
 - child process termination before lock release on every outcome.
 
 An integration test uses a fake app-server subprocess to exercise
@@ -689,7 +728,7 @@ The MVP is accepted when a clean local demonstration can:
 - MCP progress notifications, which would be the remedy if reviews ever need to
   run longer than the client idle timeout.
 - Background jobs, polling, and cancellation UI.
-- Per-workflow state files and per-workflow locks.
+- Per-workflow state files. Locks are already per workflow.
 - Multiple simultaneous review conversations on one branch.
 - Multiple reviewers or author/reviewer role selection.
 - Automatic implementation of Codex findings.

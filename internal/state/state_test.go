@@ -318,6 +318,53 @@ func TestDefaultPath(t *testing.T) {
 	}
 }
 
+func TestWorkflowLockPathIsHashedBesideStateFile(t *testing.T) {
+	st := NewStore("/x/y/state.json")
+	got := st.WorkflowLockPath("repo-identity\trefs/heads/feature")
+	dir, name := filepath.Split(got)
+	if dir != "/x/y/locks/" || len(name) != len(".lock")+16 || !strings.HasSuffix(name, ".lock") {
+		t.Errorf("WorkflowLockPath = %q", got)
+	}
+	if !IsObjectID(strings.TrimSuffix(name, ".lock") + strings.Repeat("0", 24)) {
+		t.Errorf("lock name %q is not lower-case hex", name)
+	}
+	if st.WorkflowLockPath("repo-identity\trefs/heads/feature") != got {
+		t.Error("lock path is not deterministic")
+	}
+	if st.WorkflowLockPath("repo-identity\trefs/heads/other") == got {
+		t.Error("different workflows share a lock path")
+	}
+	if strings.Contains(got, "feature") || strings.Contains(got, "/heads") {
+		t.Errorf("lock path %q carries ref text", got)
+	}
+}
+
+func TestSameReplayFieldsIgnoresHistoryOnly(t *testing.T) {
+	base := Workflow{ThreadID: "t", LastCommit: "c", LastBase: "b", LastRequestHash: "h", Round: 2, LastReview: "r", LastWarnings: []string{"w"},
+		History: []HistoryRecord{{Round: 1, Commit: "c", Base: "b", Review: "old"}}}
+	same := base
+	same.History = nil
+	if !base.SameReplayFields(same) {
+		t.Error("history difference reported as a replay-field change")
+	}
+	for name, mutate := range map[string]func(w *Workflow){
+		"thread":   func(w *Workflow) { w.ThreadID = "x" },
+		"commit":   func(w *Workflow) { w.LastCommit = "x" },
+		"base":     func(w *Workflow) { w.LastBase = "x" },
+		"hash":     func(w *Workflow) { w.LastRequestHash = "x" },
+		"round":    func(w *Workflow) { w.Round++ },
+		"review":   func(w *Workflow) { w.LastReview = "x" },
+		"warnings": func(w *Workflow) { w.LastWarnings = nil },
+	} {
+		w := base
+		w.LastWarnings = append([]string{}, base.LastWarnings...)
+		mutate(&w)
+		if base.SameReplayFields(w) {
+			t.Errorf("%s change not detected", name)
+		}
+	}
+}
+
 func TestLockPathIsBesideStateFile(t *testing.T) {
 	st := NewStore("/x/y/state.json")
 	if got := st.LockPath(); got != "/x/y/state.json.lock" {

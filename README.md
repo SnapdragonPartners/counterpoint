@@ -85,11 +85,12 @@ Counterpoint applies two fixed phase budgets inside a review call: sixty
 seconds for setup, which covers starting `codex app-server`, its handshake, and
 starting or resuming the thread, and then twenty minutes for the review turn
 itself. These are not a bound on the whole call. Lock acquisition waits up to
-two seconds, Git validation and state persistence have no Counterpoint
-deadline, and cleanup after a failure or cancellation can add up to five
-seconds waiting for the turn to interrupt and five more waiting for the child
-to exit before it is killed. A call that hits every budget can exceed
-twenty-one minutes by that cleanup time plus however long Git takes.
+two seconds at the start (thirty when recording a completed review), Git
+validation and state persistence have no Counterpoint deadline, and cleanup
+after a failure or cancellation can add up to five seconds waiting for the turn
+to interrupt and five more waiting for the child to exit before it is killed. A
+call that hits every budget can exceed twenty-one minutes by that cleanup time
+plus however long Git takes.
 
 Claude Code separately aborts a stdio MCP tool call that has produced no
 response for thirty minutes by default, controlled by the
@@ -189,6 +190,17 @@ before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
 
 ## Operational notes
 
+- Reviews of different repositories or branches run at the same time, each
+  in its own Counterpoint process with its own Codex session. A second
+  review of the same branch fails while the first runs with "another review
+  of branch ... is in progress" and tells the agent not to retry a call the
+  client moved to the background, since it is still running, and otherwise
+  to wait for the round to finish and retry. An error saying the state file
+  at its path "is busy" means another process is reading or writing the
+  shared state file at that instant, which takes moments, or an older
+  Counterpoint is holding it for a whole review; the error says to retry in
+  ten seconds and to restart Claude Code sessions after installing a new
+  version.
 - Counterpoint names its threads `Counterpoint review: <repository> <branch>`
   so they are easy to leave alone in the Codex app. Only one process can hold
   a thread at a time. If the thread is open in the app, the next review fails

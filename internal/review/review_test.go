@@ -48,6 +48,7 @@ type fakeReviewer struct {
 	unarchived     []string
 	unarchiveErr   error              // nil: unarchive succeeds and the thread resumes afterwards
 	cancelOnResume context.CancelFunc // called before a scripted resume failure is returned
+	releaseTurn    chan struct{}      // when set, Review blocks until it is closed or ctx ends
 	named          []string
 	nameErr        error
 	reviewText     string // when set, the review text returned instead of the derived one
@@ -130,9 +131,17 @@ func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string
 	f.instructions = append(f.instructions, instructions)
 	block, err, warnings := f.blockUntilCtx, f.reviewErr, f.warnings
 	during := f.duringTurn
+	gate := f.releaseTurn
 	f.mu.Unlock()
 	if during != nil {
 		during(f.lastCwd())
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w: %w", appserver.ErrTurnInterrupted, ctx.Err())
+		}
 	}
 	if block {
 		<-ctx.Done()
@@ -172,8 +181,16 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessOn(t, filepath.Join(t.TempDir(), "state", "state.json"), filepath.Join(resolvedTempDir(t), "checkouts"))
+}
+
+// newHarnessOn builds a harness with its own repository and fake reviewer
+// on an existing state file path and checkout root, so two harnesses can
+// stand in for two Counterpoint processes sharing one installation.
+func newHarnessOn(t *testing.T, statePath, checkoutRoot string) *harness {
+	t.Helper()
 	h := &harness{repo: newTestRepo(t), reviewer: &fakeReviewer{}}
-	h.store = state.NewStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	h.store = state.NewStore(statePath)
 	h.svc = New(Options{
 		Store:  h.store,
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
@@ -184,9 +201,26 @@ func newHarness(t *testing.T) *harness {
 			h.reviewer.mu.Unlock()
 			return h.reviewer, nil
 		},
-		CheckoutRoot: filepath.Join(resolvedTempDir(t), "checkouts"),
+		CheckoutRoot: checkoutRoot,
 	})
 	return h
+}
+
+// key is the harness repository's workflow key for the feature branch.
+func (h *harness) key(t *testing.T) string {
+	t.Helper()
+	repo, err := gitrepo.Open(context.Background(), h.repo.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gitrepo.WorkflowKey(repo.Identity(), "refs/heads/feature")
+}
+
+// workflowLockPath is the path of the lock held for a review of the
+// harness repository's feature branch.
+func (h *harness) workflowLockPath(t *testing.T) string {
+	t.Helper()
+	return h.store.WorkflowLockPath(h.key(t))
 }
 
 // resolvedTempDir is a fresh temp dir with symlinks resolved, so paths the
@@ -766,7 +800,28 @@ func TestTimeoutInterruptsAndReports(t *testing.T) {
 	}
 }
 
-func TestLockContentionFailsClearly(t *testing.T) {
+func TestWorkflowLockContentionFailsClearly(t *testing.T) {
+	h := newHarness(t)
+	held, err := state.AcquireLock(context.Background(), h.workflowLockPath(t), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Release() }()
+
+	tip := h.repo.git("rev-parse", "HEAD")
+	_, err = h.svc.Review(context.Background(), h.request(tip, "r1"))
+	if !errors.Is(err, state.ErrLocked) || !strings.Contains(err.Error(), "another review of branch refs/heads/feature is in progress") ||
+		!strings.Contains(err.Error(), "do not retry: it is still running") || !strings.Contains(err.Error(), "wait for the running round to finish and retry") {
+		t.Fatalf("error = %v, want ErrLocked naming the branch and telling the caller what to do", err)
+	}
+	if h.spawns != 0 {
+		t.Error("reviewer spawned while the workflow lock was held elsewhere")
+	}
+}
+
+// The state lock guards only the file; held elsewhere at the start, the
+// review fails before anything is spawned and says the file is busy.
+func TestStateLockContentionFailsClearly(t *testing.T) {
 	h := newHarness(t)
 	held, err := state.AcquireLock(context.Background(), h.store.LockPath(), time.Second)
 	if err != nil {
@@ -776,11 +831,296 @@ func TestLockContentionFailsClearly(t *testing.T) {
 
 	tip := h.repo.git("rev-parse", "HEAD")
 	_, err = h.svc.Review(context.Background(), h.request(tip, "r1"))
-	if !errors.Is(err, state.ErrLocked) {
-		t.Fatalf("error = %v, want ErrLocked", err)
+	if !errors.Is(err, state.ErrLocked) || !strings.Contains(err.Error(), "is busy") || !strings.Contains(err.Error(), "retry in ten seconds") {
+		t.Fatalf("error = %v, want ErrLocked saying the state file is busy and when to retry", err)
 	}
 	if h.spawns != 0 {
-		t.Error("reviewer spawned while the lock was held elsewhere")
+		t.Error("reviewer spawned while the state lock was held elsewhere")
+	}
+}
+
+// The state lock is released before setup: the reviewer is spawned after
+// Git validation, and at that point the state lock must be free.
+func TestStateLockIsNotHeldDuringSetupOrTurn(t *testing.T) {
+	h := newHarness(t)
+	freeAtSpawn, freeInTurn := false, false
+	probe := func() bool {
+		l, err := state.AcquireLock(context.Background(), h.store.LockPath(), 0)
+		if err != nil {
+			return false
+		}
+		_ = l.Release()
+		return true
+	}
+	h.svc.newReviewer = func(context.Context, []string) (Reviewer, error) {
+		h.spawns++
+		freeAtSpawn = probe()
+		return h.reviewer, nil
+	}
+	h.reviewer.duringTurn = func(string) { freeInTurn = probe() }
+	tip := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(tip, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if !freeAtSpawn || !freeInTurn {
+		t.Errorf("state lock free at spawn=%v, in turn=%v; want both", freeAtSpawn, freeInTurn)
+	}
+}
+
+// Reviews of two workflows run at the same time: the first is held in its
+// turn while the second completes, and both records are in the file.
+func TestReviewsOfDifferentWorkflowsRunConcurrently(t *testing.T) {
+	a := newHarness(t)
+	b := newHarnessOn(t, a.store.Path(), a.svc.checkoutRoot)
+	a.reviewer.releaseTurn = make(chan struct{})
+	a.reviewer.reviewStarted = make(chan struct{})
+	tipA := a.repo.git("rev-parse", "HEAD")
+	tipB := b.repo.git("rev-parse", "HEAD")
+
+	type outcome struct {
+		res *Result
+		err error
+	}
+	doneA := make(chan outcome, 1)
+	go func() {
+		res, err := a.svc.Review(context.Background(), a.request(tipA, "a1"))
+		doneA <- outcome{res, err}
+	}()
+	select {
+	case <-a.reviewer.reviewStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("review A did not reach its turn")
+	}
+
+	resB, err := b.svc.Review(context.Background(), b.request(tipB, "b1"))
+	if err != nil {
+		t.Fatalf("review B while A is in its turn: %v", err)
+	}
+	close(a.reviewer.releaseTurn)
+	outA := <-doneA
+	if outA.err != nil {
+		t.Fatalf("review A: %v", outA.err)
+	}
+
+	st, err := a.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wa, okA := st.Get(a.key(t))
+	wb, okB := st.Get(b.key(t))
+	if !okA || !okB || wa.LastReview != outA.res.Review || wb.LastReview != resB.Review || wa.Round != 1 || wb.Round != 1 {
+		t.Errorf("records after concurrent reviews: A=%+v (%v) B=%+v (%v)", wa, okA, wb, okB)
+	}
+	if a.spawns != 1 || b.spawns != 1 {
+		t.Errorf("spawns A=%d B=%d, want 1 and 1", a.spawns, b.spawns)
+	}
+}
+
+// A second round of the same workflow is refused while the first is in
+// its turn, and spawns nothing.
+func TestSameWorkflowIsRefusedWhileInProgress(t *testing.T) {
+	a := newHarness(t)
+	a.reviewer.releaseTurn = make(chan struct{})
+	a.reviewer.reviewStarted = make(chan struct{})
+	tip := a.repo.git("rev-parse", "HEAD")
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := a.svc.Review(context.Background(), a.request(tip, "a1"))
+		doneA <- err
+	}()
+	select {
+	case <-a.reviewer.reviewStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("review A did not reach its turn")
+	}
+
+	second := &fakeReviewer{}
+	spawns := 0
+	svc2 := New(Options{Store: state.NewStore(a.store.Path()), Logger: a.svc.log, CheckoutRoot: a.svc.checkoutRoot,
+		NewReviewer: func(context.Context, []string) (Reviewer, error) { spawns++; return second, nil }})
+	_, err := svc2.Review(context.Background(), a.request(tip, "a2"))
+	if !errors.Is(err, state.ErrLocked) || spawns != 0 {
+		t.Errorf("second round: error = %v, spawns = %d; want ErrLocked and no spawn", err, spawns)
+	}
+	close(a.reviewer.releaseTurn)
+	if err := <-doneA; err != nil {
+		t.Fatalf("review A: %v", err)
+	}
+}
+
+// A foreign record written while a review is in its turn survives that
+// review's final save.
+func TestFinalSaveKeepsRecordsWrittenMeanwhile(t *testing.T) {
+	a := newHarness(t)
+	a.reviewer.releaseTurn = make(chan struct{})
+	a.reviewer.reviewStarted = make(chan struct{})
+	tip := a.repo.git("rev-parse", "HEAD")
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := a.svc.Review(context.Background(), a.request(tip, "a1"))
+		doneA <- err
+	}()
+	select {
+	case <-a.reviewer.reviewStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("review A did not reach its turn")
+	}
+
+	other := state.NewStore(a.store.Path())
+	st, err := other.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := state.Workflow{ThreadID: "thr_x", LastCommit: strings.Repeat("c", 40), LastBase: strings.Repeat("b", 40), LastRequestHash: "hx", Round: 7, LastReview: "foreign"}
+	st.Put("foreign-workflow", foreign)
+	if err := other.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	close(a.reviewer.releaseTurn)
+	if err := <-doneA; err != nil {
+		t.Fatalf("review A: %v", err)
+	}
+
+	st, err = a.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := st.Get("foreign-workflow")
+	if !ok || !got.SameReplayFields(foreign) {
+		t.Errorf("foreign record after A's save = %+v (%v), want it unchanged", got, ok)
+	}
+	if _, ok := st.Get(a.key(t)); !ok {
+		t.Error("A's record missing")
+	}
+}
+
+// A change to this workflow's own record by a writer that bypassed the
+// workflow lock refuses the final save and leaves the file as that writer
+// left it.
+func TestFinalSaveRefusesWhenOwnRecordChanged(t *testing.T) {
+	a := newHarness(t)
+	tip := a.repo.git("rev-parse", "HEAD")
+	if _, err := a.svc.Review(context.Background(), a.request(tip, "a1")); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh reviewer for the gated round: the start signal fires once
+	// per reviewer, and round one already used this one.
+	a.reviewer = &fakeReviewer{releaseTurn: make(chan struct{}), reviewStarted: make(chan struct{})}
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := a.svc.Review(context.Background(), a.request(tip, "a2"))
+		doneA <- err
+	}()
+	select {
+	case <-a.reviewer.reviewStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("review A did not reach its turn")
+	}
+
+	other := state.NewStore(a.store.Path())
+	st, err := other.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := st.Get(a.key(t))
+	wf.LastReview = "rewritten by a foreign writer"
+	st.Put(a.key(t), wf)
+	if err := other.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	close(a.reviewer.releaseTurn)
+	err = <-doneA
+	if !errors.Is(err, ErrStateInvalid) || !strings.Contains(err.Error(), "changed during the review") {
+		t.Fatalf("error = %v, want ErrStateInvalid for a record changed during the review", err)
+	}
+	st, err = a.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.Get(a.key(t)); got.LastReview != "rewritten by a foreign writer" || got.Round != 1 {
+		t.Errorf("record after refused save = %+v; want the foreign writer's version", got)
+	}
+}
+
+// Another review's second-stage size-pressure eviction clears this
+// in-flight workflow's history. The final save honors it: the round is
+// recorded, nothing older is resurrected, and no conflict is reported.
+func TestFinalSaveHonorsConcurrentHistoryEviction(t *testing.T) {
+	a := newHarness(t)
+	tip := a.repo.git("rev-parse", "HEAD")
+	for i := 1; i <= 3; i++ {
+		a.reviewer.reviewText = fmt.Sprintf("verdict %d", i)
+		if _, err := a.svc.Review(context.Background(), a.request(tip, fmt.Sprintf("a%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if wf := a.workflow(t); len(wf.History) != 2 {
+		t.Fatalf("fixture: history has %d records, want 2", len(wf.History))
+	}
+	a.reviewer = &fakeReviewer{reviewText: "verdict 4", releaseTurn: make(chan struct{}), reviewStarted: make(chan struct{})}
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := a.svc.Review(context.Background(), a.request(tip, "a4"))
+		doneA <- err
+	}()
+	select {
+	case <-a.reviewer.reviewStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("review A did not reach its turn")
+	}
+
+	// Another process's eviction: every workflow's history cleared, replay
+	// fields untouched.
+	other := state.NewStore(a.store.Path())
+	st, err := other.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := st.Get(a.key(t))
+	wf.History = nil
+	st.Put(a.key(t), wf)
+	if err := other.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	close(a.reviewer.releaseTurn)
+	if err := <-doneA; err != nil {
+		t.Fatalf("review A after a concurrent eviction: %v", err)
+	}
+	got := a.workflow(t)
+	if got.Round != 4 || got.LastReview != "verdict 4" || len(got.History) != 1 || got.History[0].Round != 3 || got.History[0].Review != "verdict 3" {
+		t.Errorf("record after eviction = %+v; want round 4 with only round 3 retained", got)
+	}
+}
+
+// The state lock held by another process when a review completes, for
+// less than the final wait, delays the save without failing it.
+func TestFinalSaveWaitsForTheStateLock(t *testing.T) {
+	a := newHarness(t)
+	a.reviewer.releaseTurn = make(chan struct{})
+	a.reviewer.reviewStarted = make(chan struct{})
+	tip := a.repo.git("rev-parse", "HEAD")
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := a.svc.Review(context.Background(), a.request(tip, "a1"))
+		doneA <- err
+	}()
+	select {
+	case <-a.reviewer.reviewStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("review A did not reach its turn")
+	}
+	held, err := state.AcquireLock(context.Background(), a.store.LockPath(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(a.reviewer.releaseTurn)
+	time.Sleep(3 * state.LockWait / 2) // longer than the start-phase wait
+	_ = held.Release()
+	if err := <-doneA; err != nil {
+		t.Fatalf("review A with the state lock briefly held at the end: %v", err)
+	}
+	if _, ok := a.workflow(t), true; !ok {
+		t.Error("record missing")
 	}
 }
 
@@ -923,8 +1263,8 @@ func TestSetupTimeoutCoversThreadCalls(t *testing.T) {
 		if h.reviewer.closed != before+1 {
 			t.Errorf("resume=%v: reviewer not closed after setup timeout", resume)
 		}
-		if l, err := state.AcquireLock(context.Background(), h.store.LockPath(), time.Second); err != nil {
-			t.Errorf("resume=%v: lock not released: %v", resume, err)
+		if l, err := state.AcquireLock(context.Background(), h.workflowLockPath(t), time.Second); err != nil {
+			t.Errorf("resume=%v: workflow lock not released: %v", resume, err)
 		} else {
 			_ = l.Release()
 		}
@@ -940,8 +1280,8 @@ func TestOversizedBranchNotesAreRejected(t *testing.T) {
 	}
 }
 
-// lockProbeReviewer records, when closed, whether the review lock was still
-// held: Close must run before the lock is released.
+// lockProbeReviewer records, when closed, whether the workflow lock was
+// still held: Close must run before the lock is released.
 type lockProbeReviewer struct {
 	fakeReviewer
 	lockPath    string
@@ -956,7 +1296,7 @@ func (l *lockProbeReviewer) Close() {
 
 func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
 	h := newHarness(t)
-	probe := &lockProbeReviewer{lockPath: h.store.LockPath()}
+	probe := &lockProbeReviewer{lockPath: h.workflowLockPath(t)}
 	probe.blockUntilCtx = true
 	probe.reviewStarted = make(chan struct{})
 	h.svc.newReviewer = func(context.Context, []string) (Reviewer, error) { return probe, nil }
@@ -980,8 +1320,8 @@ func TestCancellationClosesReviewerBeforeReleasingLock(t *testing.T) {
 	if probe.closed != 1 || !probe.heldOnClose {
 		t.Errorf("closed=%d heldOnClose=%v; want the reviewer closed while the lock was still held", probe.closed, probe.heldOnClose)
 	}
-	if l, err := state.AcquireLock(context.Background(), h.store.LockPath(), time.Second); err != nil {
-		t.Errorf("lock not released after cancellation: %v", err)
+	if l, err := state.AcquireLock(context.Background(), h.workflowLockPath(t), time.Second); err != nil {
+		t.Errorf("workflow lock not released after cancellation: %v", err)
 	} else {
 		_ = l.Release()
 	}

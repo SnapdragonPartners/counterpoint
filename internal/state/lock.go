@@ -14,15 +14,25 @@ import (
 
 const (
 	// LockWait is how long AcquireLock keeps trying before reporting that
-	// another review holds the lock. It is short on purpose: a blocked
-	// caller should fail clearly rather than queue behind a full review.
+	// another process holds the lock. It is the wait for the workflow lock,
+	// the start-phase state lock, and the scratch directory lock, and is
+	// short on purpose: a blocked caller should fail clearly rather than
+	// queue behind a full review.
 	LockWait = 2 * time.Second
+	// FinalSaveLockWait bounds waiting for the state lock when a completed
+	// review is being recorded. It is longer than LockWait because the
+	// review has been paid for by then and the holder may be another
+	// process legitimately finishing at the same moment: encoding,
+	// syncing, renaming, and up to two eviction retries. The request
+	// context bounds it as well.
+	FinalSaveLockWait = 30 * time.Second
 	// lockPollInterval is the retry interval while waiting for the lock.
 	lockPollInterval = 100 * time.Millisecond
 )
 
-// ErrLocked reports that another Counterpoint process holds the review lock.
-var ErrLocked = errors.New("another review is in progress")
+// ErrLocked reports that another process holds an advisory lock. Callers
+// wrap it with what the lock protects and what to do about it.
+var ErrLocked = errors.New("lock held by another process")
 
 // Lock is a held advisory file lock. It is released by Release, and by the
 // operating system if the process exits.

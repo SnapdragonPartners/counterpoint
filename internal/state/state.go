@@ -9,12 +9,15 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 const (
@@ -35,6 +38,14 @@ const (
 	configSubdir = "counterpoint"
 	// stateFileName is the state file name inside configSubdir.
 	stateFileName = "state.json"
+
+	// locksDirName is the directory beside the state file holding one lock
+	// file per workflow, and lockNameLen how many hex characters of the
+	// workflow key's SHA-256 name the file: the scheme internal/scratch
+	// uses for checkout directories, so the two are visibly one workflow.
+	// Hashing keeps untrusted path and ref text out of file names.
+	locksDirName = "locks"
+	lockNameLen  = 16
 
 	dirPerm  = 0o700
 	filePerm = 0o600
@@ -66,6 +77,17 @@ type Workflow struct {
 	// History holds the completed rounds before the one in LastReview,
 	// oldest first, under the bounds in history.go.
 	History []HistoryRecord `json:"history,omitempty"`
+}
+
+// SameReplayFields reports whether w and o agree on every field that
+// records the completed review: thread, commit, base, request hash, round,
+// review text, and warnings. History is excluded on purpose: another
+// review's size-pressure eviction may clear it while this workflow is in
+// flight, and that is not a conflicting write (docs/design/per-workflow-locks.md).
+func (w Workflow) SameReplayFields(o Workflow) bool {
+	return w.ThreadID == o.ThreadID && w.LastCommit == o.LastCommit && w.LastBase == o.LastBase &&
+		w.LastRequestHash == o.LastRequestHash && w.Round == o.Round && w.LastReview == o.LastReview &&
+		slices.Equal(w.LastWarnings, o.LastWarnings)
 }
 
 // State is the in-memory form of the state file.
@@ -137,9 +159,21 @@ func NewStore(path string) *Store {
 // Path returns the state file path.
 func (st *Store) Path() string { return st.path }
 
-// LockPath returns the lock file path beside the state file.
+// LockPath returns the state lock's path beside the state file. The state
+// lock guards each read or read-modify-write of the file and is held for
+// milliseconds; the review itself is serialized per workflow by
+// WorkflowLockPath.
 func (st *Store) LockPath() string {
 	return st.path + ".lock"
+}
+
+// WorkflowLockPath returns the path of the lock held for the whole of one
+// workflow's review, in a locks directory beside the state file, so
+// EnvStatePath moves the locks with the state. The file is named by a
+// prefix of the workflow key's hash and is never deleted.
+func (st *Store) WorkflowLockPath(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(filepath.Dir(st.path), locksDirName, hex.EncodeToString(sum[:])[:lockNameLen]+".lock")
 }
 
 // Load reads the state file. A missing file yields empty state. A file that
