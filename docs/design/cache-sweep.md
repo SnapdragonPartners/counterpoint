@@ -2,8 +2,9 @@
 
 Design record for
 [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
-Settled between DR, Claude, and Codex on 2026-09-08 before the code was
-written; the implementation on the same branch follows this document. Once it
+Settled between DR, Claude, and Codex on 2026-09-08 over twelve review
+rounds before the code was written; the implementation on the same branch
+follows this document. Once it
 lands, the contract lives in `docs/MVP.md` and this file keeps the evidence,
 the reasoning, and the rejected alternatives.
 

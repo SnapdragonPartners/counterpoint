@@ -89,6 +89,23 @@ func AcquireLock(ctx context.Context, path string, wait time.Duration) (*Lock, e
 	}
 }
 
+// TryLockFile takes an exclusive advisory lock on an already-open file
+// without waiting, for callers that opened and validated the file
+// themselves, such as the scratch sweep judging a directory it did not
+// create. On success the returned Lock owns f and closes it on Release; on
+// ErrLocked or any other error f is left open for the caller.
+func TryLockFile(f *os.File) (*Lock, error) {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	switch {
+	case err == nil:
+		return &Lock{f: f}, nil
+	case errors.Is(err, syscall.EWOULDBLOCK):
+		return nil, fmt.Errorf("%w: lock file %s", ErrLocked, f.Name())
+	default:
+		return nil, fmt.Errorf("lock %s: %w", f.Name(), err)
+	}
+}
+
 // Release unlocks and closes the lock file. It is safe to call once.
 func (l *Lock) Release() error {
 	if l == nil || l.f == nil {

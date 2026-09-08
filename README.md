@@ -164,9 +164,11 @@ kept, so expect one cold build per branch and a test run per round on top of
 the review itself, and ask for it when the change warrants that evidence. The
 reviewer's tracked-file changes in the checkout, if any, come back as a
 warning. Lint tooling that needs a download is not available to the reviewer
-and is reported as not run; CI still lints. The cache has no eviction yet
-([issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15));
-deleting directories under the scratch root is safe between reviews.
+and is reported as not run; CI still lints. A workflow's cache is kept
+while the workflow has had a build-capable review in the last 72 hours and
+is swept by the next build-capable review of any workflow after that, so
+a branch resumed after longer pays one cold build; deleting directories
+under the scratch root by hand is also safe between reviews.
 
 Prerequisites at review time: a clean worktree checked out at the tip of a
 non-primary branch, and a locally authenticated Codex CLI.

@@ -230,3 +230,38 @@ func TestAcquireLockRejectsUnusablePath(t *testing.T) {
 		t.Fatal("AcquireLock under a regular file: want error")
 	}
 }
+
+func TestTryLockFileTakesAFreeLockAndRefusesAHeldOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.lock")
+	held, err := AcquireLock(context.Background(), path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TryLockFile(f); !errors.Is(err, ErrLocked) {
+		t.Fatalf("TryLockFile while held: error = %v, want ErrLocked", err)
+	}
+	// On refusal the caller still owns the file.
+	if _, err := f.Stat(); err != nil {
+		t.Errorf("file closed on refusal: %v", err)
+	}
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := TryLockFile(f)
+	if err != nil {
+		t.Fatalf("TryLockFile once free: %v", err)
+	}
+	if _, err := AcquireLock(context.Background(), path, 0); !errors.Is(err, ErrLocked) {
+		t.Errorf("lock not exclusive after TryLockFile: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Stat(); err == nil {
+		t.Error("Release did not close the file it took ownership of")
+	}
+}

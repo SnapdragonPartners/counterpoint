@@ -7,8 +7,8 @@ summary = "The adversaries Counterpoint defends against are untrusted inputs and
 
 # 0001. Threat Model
 
-Status: Proposed (DR agreed 2026-09-08; awaiting Codex approval in the
-review of the branch that introduces this file)
+Status: Accepted (Codex + DR, 2026-09-08; Codex in round 12 of the
+`feat/cache-sweep` review, DR in the same session)
 
 ## Context
 
