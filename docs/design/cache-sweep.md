@@ -158,10 +158,16 @@ that removal never leaves the workflow directory, by two mechanisms:
   path-based `Lstat`-then-descend cannot promise. Links are unlinked, not
   followed; directories are removed post-order with `Remove`, never
   `RemoveAll`, so the context is checked between entries.
-- **Device boundary.** Before descending into a directory, the walk
-  compares its device id with the workflow directory's and refuses to
-  descend into or remove a directory on a different device; the entry is
-  left in place and logged. This refuses every mount a same-user process
+- **Device boundary, bound to the handle.** The walk descends into a
+  child directory by opening it as a sub-root, then `fstat`s that opened
+  handle and compares the device id with the workflow directory's, which
+  was taken the same way from its own opened root. Only if they match does
+  the walk list and remove through that handle; otherwise the handle is
+  closed and the directory is left in place and logged. Checking the
+  opened handle rather than a path closes the window between a check and
+  an open: a mount placed over the directory after the handle was opened
+  does not change what the handle refers to, and a mount placed before it
+  is what the `fstat` sees. This refuses every mount a same-user process
   can make visible to Counterpoint: a FUSE or disk-image mount has its own
   device id, and a bind mount made in an unprivileged user namespace on
   Linux exists only in that namespace's mount table and is invisible to
@@ -169,12 +175,15 @@ that removal never leaves the workflow directory, by two mechanisms:
   namespace needs privileges the user does not have and is outside the
   threat model, as it is for every file operation in this package.
 
-The device boundary is exercised in tests through a predicate the walk
-takes for the same-device decision, since a test cannot create a mount; the
-mapping of that predicate to the real device id is stated beside the
-implementation as the untestable part. The existing `removeOwned` keeps
-`os.RemoveAll` for the small per-round directories; making it rooted is a
-separate cleanup and is tracked in the issue for this change.
+The same-device decision is a predicate the walk takes, called with the
+`fstat` result of the opened handle and nothing else, so tests exercise the
+refusal without creating a mount and can verify the ordering: the predicate
+sees the inode of the directory that was opened, and a directory it
+refuses is never listed. The mapping of that predicate to the real device
+id is stated beside the implementation as the untestable part. The
+existing `removeOwned` keeps `os.RemoveAll` for the small per-round
+directories; making it rooted is a separate cleanup and is tracked in the
+issue for this change.
 
 A sweep failure on one entry is logged and the sweep continues; a sweep
 never fails the review, except that cancellation of the request ends it
@@ -235,7 +244,10 @@ context-aware traversal, because caches are the only large trees.
   stamp or cache is still visited, and only its trash is removed.
 - The device boundary: a directory inside trash for which the same-device
   predicate is false is left in place with its contents, its siblings are
-  still removed, and the walk reports what it skipped.
+  still removed, and the walk reports what it skipped. The predicate is
+  called with the `fstat` of the opened handle, checked by asserting the
+  inode it sees is the directory's, and a refused directory is never
+  listed.
 - A symbolic link inside trash pointing outside the workflow directory is
   unlinked and its target is untouched.
 - Freshness under the lock: a stamp refreshed after the age check but
