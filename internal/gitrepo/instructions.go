@@ -27,7 +27,9 @@ var ErrInstructionsInvalid = errors.New("COUNTERPOINT.md cannot be used")
 // ReadInstructions returns the text of InstructionsFile at the root of
 // commit, or "" when the commit has no such file or it is blank. The file is
 // read from the commit object, never from a worktree, so the text is part of
-// the immutable review target. commit must be a full object id.
+// the immutable review target. commit must be a full object id. Trailing
+// newlines are removed, as for every Git result in this package; the text
+// is otherwise unchanged.
 //
 // Accepted: a blob in mode 100644 or 100755, at most MaxInstructionsBytes,
 // valid UTF-8. Rejected with ErrInstructionsInvalid: a symbolic link, a

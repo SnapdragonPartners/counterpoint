@@ -506,7 +506,8 @@ immutable target and covered by the request hash through the commit. It
 must be a blob in mode 100644 or 100755 of at most 16 KiB of valid UTF-8;
 a symbolic link, submodule, directory, oversized, or non-UTF-8 file fails
 the request before the app-server is started, and the text is never
-truncated. A blank file is treated as absent.
+truncated; only trailing newlines are removed, as for the branch notes. A
+blank file is treated as absent.
 
 The instructions may be compiled into the binary for the MVP. Configurable
 prompt paths and templates are deferred.
@@ -622,8 +623,8 @@ Unit tests cover:
 - `COUNTERPOINT.md`: read from the named commit rather than the worktree,
   absent and blank treated as none, an executable blob accepted, and
   rejection of a symbolic link, a directory, an oversized file, and invalid
-  UTF-8 with no content echoed in the error; its verbatim delimited quoting
-  before the branch notes, absence of the section when there is no file,
+  UTF-8 with no content echoed in the error; its delimited quoting,
+  unchanged apart from trailing newlines, before the branch notes, absence of the section when there is no file,
   forged delimiters defeated, and a review request whose commit carries an
   unusable file failing before the reviewer is spawned;
 - merge-base resolution against local and remote-tracking primary branches;

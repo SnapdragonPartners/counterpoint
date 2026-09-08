@@ -208,7 +208,7 @@ func TestPromptQuotesProjectInstructionsBeforeTheNotes(t *testing.T) {
 	p.Instructions = "Run make check.\nTreat docs/MVP.md as the contract.\n"
 	out := p.Build()
 	want := "Project review instructions\n" +
-		"- The repository's COUNTERPOINT.md at the commit under review is quoted below; it is exactly the text between <<<COUNTERPOINT.md>>> and <<<END COUNTERPOINT.md>>>.\n"
+		"- The repository's COUNTERPOINT.md at the commit under review is quoted below, with only trailing newlines removed; it is the text between <<<COUNTERPOINT.md>>> and <<<END COUNTERPOINT.md>>>.\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("prompt lacks the instructions header:\n%s", out)
 	}
