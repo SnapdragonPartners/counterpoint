@@ -147,13 +147,34 @@ written into that same directory and could be forged by anyone able to
 plant a trash entry there, so it would prove nothing more than the lock
 file already does. The reviewer's sandbox cannot plant anything: its
 writable roots are `cache` and `tmp` only, never the workflow directory
-itself. What the rules do guarantee, for a planted entry as for a real one,
-is that removal never follows a link: only direct children are renamed,
-and the walk unlinks symbolic links rather than descending through them.
-A mount point planted inside a trash tree is not defended against, and no
-claim is made that it is: creating a mount needs privileges the user does
-not have, so it lies outside the same-user threat model this package
-assumes, exactly as for the `os.RemoveAll` in `removeOwned` today.
+itself. What the rules guarantee, for a planted entry as for a real one, is
+that removal never leaves the workflow directory, by two mechanisms:
+
+- **Rooted traversal.** The trash walk runs inside an `os.Root` opened on
+  the workflow directory (Go 1.24 and later): every open, `Lstat`, and
+  `Remove` is resolved relative to that root with `openat` semantics, so a
+  symbolic link cannot redirect the walk outside it even if a link is
+  planted or a directory is renamed while the walk is in progress, which a
+  path-based `Lstat`-then-descend cannot promise. Links are unlinked, not
+  followed; directories are removed post-order with `Remove`, never
+  `RemoveAll`, so the context is checked between entries.
+- **Device boundary.** Before descending into a directory, the walk
+  compares its device id with the workflow directory's and refuses to
+  descend into or remove a directory on a different device; the entry is
+  left in place and logged. This refuses every mount a same-user process
+  can make visible to Counterpoint: a FUSE or disk-image mount has its own
+  device id, and a bind mount made in an unprivileged user namespace on
+  Linux exists only in that namespace's mount table and is invisible to
+  Counterpoint's process. A bind mount in Counterpoint's own mount
+  namespace needs privileges the user does not have and is outside the
+  threat model, as it is for every file operation in this package.
+
+The device boundary is exercised in tests through a predicate the walk
+takes for the same-device decision, since a test cannot create a mount; the
+mapping of that predicate to the real device id is stated beside the
+implementation as the untestable part. The existing `removeOwned` keeps
+`os.RemoveAll` for the small per-round directories; making it rooted is a
+separate cleanup and is tracked in the issue for this change.
 
 A sweep failure on one entry is logged and the sweep continues; a sweep
 never fails the review, except that cancellation of the request ends it
@@ -212,6 +233,11 @@ context-aware traversal, because caches are the only large trees.
   entry, opens nothing outside the tree, and removes nothing.
 - Cancelled trash is reachable: an entry with leftover `trash-*` and no
   stamp or cache is still visited, and only its trash is removed.
+- The device boundary: a directory inside trash for which the same-device
+  predicate is false is left in place with its contents, its siblings are
+  still removed, and the walk reports what it skipped.
+- A symbolic link inside trash pointing outside the workflow directory is
+  unlinked and its target is untouched.
 - Freshness under the lock: a stamp refreshed after the age check but
   before the lock is taken leaves the entry untouched.
 - Cancellation during the removal of a large candidate returns promptly,
