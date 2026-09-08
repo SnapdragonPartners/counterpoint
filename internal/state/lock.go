@@ -17,6 +17,13 @@ const (
 	// another review holds the lock. It is short on purpose: a blocked
 	// caller should fail clearly rather than queue behind a full review.
 	LockWait = 2 * time.Second
+	// FinalSaveLockWait bounds waiting for the state lock when a completed
+	// review is being recorded. It is longer than LockWait because the
+	// review has been paid for by then and the holder may be another
+	// process legitimately finishing at the same moment: encoding,
+	// syncing, renaming, and up to two eviction retries. The request
+	// context bounds it as well.
+	FinalSaveLockWait = 30 * time.Second
 	// lockPollInterval is the retry interval while waiting for the lock.
 	lockPollInterval = 100 * time.Millisecond
 )

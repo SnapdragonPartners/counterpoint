@@ -197,16 +197,6 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	}
 	requestID := RequestIDFrom(ctx)
 
-	lock, err := state.AcquireLock(ctx, s.store.LockPath(), state.LockWait)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if rerr := lock.Release(); rerr != nil {
-			s.log.Warn("release review lock", "error", rerr)
-		}
-	}()
-
 	repo, err := gitrepo.Open(ctx, req.Repo)
 	if err != nil {
 		return nil, err
@@ -217,11 +207,29 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	}
 	key := gitrepo.WorkflowKey(repo.Identity(), branch.Ref)
 
-	st, err := s.store.Load()
+	// The workflow lock serializes rounds of this workflow and is held for
+	// the whole review, until after the child has exited: Codex's
+	// per-thread writer lock is handed over that way. Reviews of other
+	// workflows run concurrently (docs/design/per-workflow-locks.md). It is
+	// the root of the lock order: the state lock and the scratch directory
+	// lock are only ever taken while holding it.
+	lock, err := state.AcquireLock(ctx, s.store.WorkflowLockPath(key), state.LockWait)
+	if err != nil {
+		if errors.Is(err, state.ErrLocked) {
+			return nil, fmt.Errorf("branch %s: %w", branch.Ref, err)
+		}
+		return nil, err
+	}
+	defer func() {
+		if rerr := lock.Release(); rerr != nil {
+			s.log.Warn("release review lock", "error", rerr)
+		}
+	}()
+
+	wf, known, err := s.loadWorkflow(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	wf, known := st.Get(key)
 	if known {
 		// A stored workflow must be a complete record of a finished review;
 		// anything else could only come from corruption or a foreign
@@ -259,7 +267,9 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		Build:       req.Build,
 	}
 	hash := ident.Hash()
-	if prev, ok := st.Replay(key, hash); ok {
+	// The record copied under the state lock is still current: the
+	// workflow lock excludes any other round of this workflow.
+	if prev, ok := replay(wf, known, hash); ok {
 		s.log.Info("review replayed from state", "request", requestID, "workflow", key, "round", prev.Round, "commit", target.Commit)
 		return &Result{
 			Repo: repo.Worktree, Branch: branch.Ref, Commit: target.Commit, Base: target.Base,
@@ -426,11 +436,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		}
 	}
 
-	var history []state.HistoryRecord
-	if known {
-		history = state.RetainHistory(wf.History, previous, rev.Text)
-	}
-	st.Put(key, state.Workflow{
+	done := state.Workflow{
 		ThreadID:        thread.ID,
 		LastCommit:      target.Commit,
 		LastBase:        target.Base,
@@ -438,9 +444,8 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		Round:           round,
 		LastReview:      rev.Text,
 		LastWarnings:    rev.Warnings,
-		History:         history,
-	})
-	if err := s.saveEvictingHistory(st, key, requestID); err != nil {
+	}
+	if err := s.saveCompleted(ctx, key, requestID, wf, known, previous, done); err != nil {
 		return nil, fmt.Errorf("review completed but state was not saved: %w", err)
 	}
 	s.log.Info("review turn completed", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
@@ -452,6 +457,89 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	}, nil
 }
 
+// replay reports the completed review to return when the request hash
+// matches the workflow's last request: the same commit, base, notes, and
+// build flag as the round already recorded.
+func replay(wf state.Workflow, known bool, hash string) (state.Workflow, bool) {
+	if !known || hash == "" || wf.LastRequestHash != hash {
+		return state.Workflow{}, false
+	}
+	return wf, true
+}
+
+// acquireStateLock takes the state lock, which guards the state file for
+// the duration of one read or read-modify-write. It is never held while
+// acquiring another lock.
+func (s *Service) acquireStateLock(ctx context.Context, wait time.Duration) (*state.Lock, error) {
+	lock, err := state.AcquireLock(ctx, s.store.LockPath(), wait)
+	if err != nil {
+		if errors.Is(err, state.ErrLocked) {
+			return nil, fmt.Errorf("state file %s is busy: %w", s.store.Path(), err)
+		}
+		return nil, err
+	}
+	return lock, nil
+}
+
+// loadWorkflow reads one workflow's record under the state lock, which is
+// released before returning so that Git validation and the reviewer's turn
+// never hold it. The caller holds the workflow lock, which keeps the copy
+// current until the review's final save.
+func (s *Service) loadWorkflow(ctx context.Context, key string) (wf state.Workflow, known bool, err error) {
+	lock, err := s.acquireStateLock(ctx, state.LockWait)
+	if err != nil {
+		return state.Workflow{}, false, err
+	}
+	defer func() {
+		if rerr := lock.Release(); rerr != nil {
+			s.log.Warn("release state lock", "error", rerr)
+		}
+	}()
+	st, err := s.store.Load()
+	if err != nil {
+		return state.Workflow{}, false, err
+	}
+	wf, known = st.Get(key)
+	return wf, known, nil
+}
+
+// saveCompleted records a completed review. It re-reads the state file
+// under the state lock so records other reviews wrote meanwhile survive,
+// then reconciles this workflow's record: its replay fields must be as
+// they were at the start (before, known), since the workflow lock excluded
+// every other round of this workflow, and any difference means a writer
+// bypassed the lock, so the save is refused rather than overwriting. Its
+// history is rebuilt from the fresh record, because another review's
+// size-pressure eviction may have cleared it legitimately and must not be
+// resurrected. previous is the record of the round being superseded.
+func (s *Service) saveCompleted(ctx context.Context, key, requestID string, before state.Workflow, known bool, previous state.HistoryRecord, done state.Workflow) error {
+	lock, err := s.acquireStateLock(ctx, state.FinalSaveLockWait)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rerr := lock.Release(); rerr != nil {
+			s.log.Warn("release state lock", "error", rerr)
+		}
+	}()
+	st, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	fresh, present := st.Get(key)
+	if present != known || (known && !fresh.SameReplayFields(before)) {
+		return fmt.Errorf("%w: workflow %s in %s changed during the review; the record was not overwritten", ErrStateInvalid, key, s.store.Path())
+	}
+	if known {
+		if bad := fresh.InvalidHistory(); bad != "" {
+			return fmt.Errorf("%w: workflow %s in %s changed during the review: %s", ErrStateInvalid, key, s.store.Path(), bad)
+		}
+		done.History = state.RetainHistory(fresh.History, previous, done.LastReview)
+	}
+	st.Put(key, done)
+	return s.saveEvictingHistory(st, key, requestID)
+}
+
 // saveEvictingHistory saves the state, giving up review history under size
 // pressure so that history, this workflow's or any other's, never leaves a
 // completed review unsaved. On ErrTooLarge it clears this workflow's
@@ -460,7 +548,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 // touched, so no workflow loses its completed-review record: history is
 // derived convenience data, which is why evicting another workflow's copy
 // stays within the rule that recovery never deletes another workflow's
-// active state. The caller holds the review lock.
+// active state. The caller holds the state lock and this workflow's lock.
 func (s *Service) saveEvictingHistory(st *state.State, key, requestID string) error {
 	err := s.store.Save(st)
 	if !errors.Is(err, state.ErrTooLarge) {
