@@ -87,57 +87,73 @@ is bounded by the request context and by the number of entries in the root;
 it reads one directory and stats two files per entry, without walking
 caches, so it costs milliseconds and never blocks on a lock.
 
-For each direct child of the canonical root:
+The root is opened once as a descriptor, `open(root, O_RDONLY|O_DIRECTORY|
+O_NOFOLLOW|O_CLOEXEC)`, and its entries are listed through it. For each
+entry, every operation from the ownership check to the last removal is
+performed relative to a descriptor for that entry, so nothing that happens
+to the path in the meantime can substitute a different directory:
 
-1. Skip anything whose name is not sixteen lower-case hex characters, a
-   symbolic link, or not a directory.
+1. Skip anything whose name is not sixteen lower-case hex characters.
 2. Skip the current workflow's directory.
-3. Require proof that Counterpoint made the directory: its `lock` file must
-   already exist as a regular file. Every workflow directory Counterpoint
-   has ever created has one, because `Prepare` creates it before anything
-   else. A hash-shaped name is not provenance: `COUNTERPOINT_CHECKOUT_DIR`
-   may point at an existing or shared directory, and a foreign entry there
-   must never be touched, nor have a lock file created in it. The sweep
-   therefore never creates a lock file; it only opens one that exists.
-4. Decide what the entry qualifies for. It qualifies for **trash removal**
-   if it contains any `trash-*` entry, whatever its age. It qualifies for
-   **sweeping** if its last use, the stamp's modification time or, with no
-   stamp, the `cache` directory's, is more than 72 hours ago. An entry that
-   qualifies for neither is skipped; this is how a tombstone with nothing
-   in it costs one directory read. Trash alone never authorizes renaming
-   a live path: an entry with trash but a fresh stamp has only its trash
-   removed.
-5. Open the entry's existing lock file without creating and without
-   following: `O_RDWR|O_NOFOLLOW` with no `O_CREATE`, then validate the
-   descriptor with `fstat`: a regular file with a link count of one, and
-   the same device and inode the `Lstat` of step 3 saw. Then try
+3. Open the entry relative to the root descriptor with
+   `openat(root, name, O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`; a link
+   or a non-directory fails to open and is skipped. `fstat` the descriptor
+   and keep its device and inode: this descriptor, not the name, is the
+   candidate from here on. If the entry is renamed away and replaced after
+   this point, the walk still refers to the directory it opened, and the
+   replacement is a fresh entry for a later sweep.
+4. Require proof that Counterpoint made the directory: `fstatat(entry,
+   "lock", AT_SYMLINK_NOFOLLOW)` must report a regular file. Every workflow
+   directory Counterpoint has ever created has one, because `Prepare`
+   creates it before anything else. A hash-shaped name is not provenance:
+   `COUNTERPOINT_CHECKOUT_DIR` may point at an existing or shared
+   directory, and a foreign entry there must never be touched, nor have a
+   lock file created in it. The sweep never creates a lock file.
+5. Decide what the entry qualifies for, reading through the descriptor
+   with `fstatat(..., AT_SYMLINK_NOFOLLOW)`. It qualifies for **trash
+   removal** if it contains any `trash-*` entry, whatever its age. It
+   qualifies for **sweeping** if its last use, the stamp's modification
+   time when the stamp is a regular file or, with no stamp, the `cache`
+   directory's, is more than 72 hours ago. An entry that qualifies for
+   neither is skipped; a tombstone with nothing in it costs one directory
+   read. Trash alone never authorizes renaming a live path: an entry with
+   trash but a fresh stamp has only its trash removed.
+6. Open the lock relative to the entry descriptor with
+   `openat(entry, "lock", O_RDWR|O_NOFOLLOW|O_CLOEXEC)` and no `O_CREATE`,
+   validate the opened descriptor with `fstat`: a regular file with a link
+   count of one and the device and inode step 4 saw. Then try
    `flock(LOCK_EX|LOCK_NB)`. If the open fails, validation fails, or the
    lock is held, skip: the entry is either being reviewed by another
-   process or has been tampered with since step 3, and in neither case is
-   it Counterpoint's to touch now. This is a new `state` helper beside
-   `AcquireLock`, which keeps its create-and-wait behavior for callers
-   that own the path; the sweep never creates a lock file.
-6. Under that lock, re-read the stamp and fallback time and decide again:
-   a `Prepare` in another process may have refreshed the stamp between
-   step 4 and the lock, and the age decision is only valid under the
-   lock. Trash removal needs no re-check.
-7. Under that lock, if the entry qualifies for sweeping, for each of its
-   `cache`, `checkout`, `tmp`, `hooks`, and `used`, apply the owned-child,
-   not-a-link rule, then rename the item to `trash-<random>` inside the
-   same workflow directory. A rename is one atomic system call that does
-   not follow links, so the item is out of use the instant it is decided,
-   whatever happens next.
-8. Under that lock, remove every `trash-*` entry in the workflow directory
-   with a context-aware walk: entries are visited with `Lstat` semantics so
-   links are unlinked rather than followed, files are unlinked and
-   directories removed post-order, and the request context is checked
-   between entries, so a cancelled request leaves `Prepare` within a
-   bounded number of operations instead of holding two scratch locks for a
-   traversal of a multi-gigabyte cache. A walk interrupted by cancellation
-   leaves a `trash-*` directory behind, which step 4 makes a candidate for
-   the next sweep of any build-capable review. Release the lock.
+   process or has been tampered with, and in neither case is it
+   Counterpoint's to touch now. This is a new `state` helper beside
+   `AcquireLock`, which keeps its create-and-wait behavior for callers that
+   own the path.
+7. Under that lock, repeat step 5's reads and decide again: a `Prepare` in
+   another process may have refreshed the stamp before the lock was taken,
+   and the age decision is only valid under the lock. Trash removal needs
+   no re-check.
+8. Under that lock, if the entry qualifies for sweeping, for each of
+   `cache`, `checkout`, `tmp`, `hooks`, and `used` that `fstatat` reports
+   as present and not a link, rename it to `trash-<random>` with
+   `renameat(entry, name, entry, trash)`. A rename is one atomic system
+   call that does not follow links, so the item is out of use the instant
+   it is decided, whatever happens next.
+9. Under that lock, remove every `trash-*` entry with the descriptor
+   traversal described below, starting from the entry descriptor, checking
+   the request context between entries, so a cancelled request leaves
+   `Prepare` within a bounded number of operations instead of holding two
+   scratch locks for a traversal of a multi-gigabyte cache. A walk
+   interrupted by cancellation leaves a `trash-*` directory behind, which
+   step 5 makes a candidate for the next sweep of any build-capable
+   review. Release the lock and close the descriptor.
 
-Ownership is established once, for the workflow directory, by step 3. Inside
+`Prepare`'s own stamp write and lock stay path-based: `Prepare` creates the
+workflow directory, verifies it is not a link, and holds its lock before
+writing the stamp, and the stamp write is an exclusive create plus a rename
+inside that directory. The sweep is the only code that judges directories
+it did not just create, which is why it alone works through descriptors.
+
+Ownership is established once, for the workflow directory, by step 4. Inside
 a directory Counterpoint created, the fixed names `checkout`, `tmp`,
 `hooks`, `cache`, `used`, and `trash-*` are Counterpoint's namespace, and
 the sweep removes them by name exactly as `Prepare` and `Close` already
@@ -150,41 +166,39 @@ writable roots are `cache` and `tmp` only, never the workflow directory
 itself. What the rules guarantee, for a planted entry as for a real one, is
 that removal never leaves the workflow directory, by two mechanisms:
 
-- **Descriptor traversal.** The trash walk never resolves a path more than
-  one component long. Starting from a descriptor for the workflow
-  directory, each child directory is opened with `openat(parent, name,
+- **Descriptor traversal.** The trash walk never resolves a path more than one
+  component long. Starting from a descriptor for the workflow directory, each
+  child directory is opened with `openat(parent, name,
   O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`, so a name that has become a
-  symbolic link, wherever it points, fails to open and is unlinked as a
-  link instead of being entered; entries are listed through the opened
-  descriptor; files and links are removed with `unlinkat(parent, name, 0)`
-  and directories, post-order, with `unlinkat(parent, name,
-  AT_REMOVEDIR)`, each relative to the descriptor of the directory that
-  was listed. Nothing in the walk can be redirected by a link planted or
-  swapped while it runs, inside or outside the workflow directory, because
-  no step follows one. This is the strategy `os.RemoveAll` itself uses on
-  Unix, with two additions: the request context is checked between
-  entries, and the device check below runs on each opened descriptor.
-  `os.Root` is not used for the walk: its sub-root open follows a link
-  that stays inside the root, which is exactly the swap that must not be
-  followed. The primitives come from `golang.org/x/sys/unix`, already an
-  indirect dependency of the module, and the walk is Unix-only like the
-  lock implementation beside it.
+  symbolic link, wherever it points, fails to open and is unlinked as a link
+  instead of being entered; entries are listed through the opened descriptor;
+  files and links are removed with `unlinkat(parent, name, 0)` and directories,
+  post-order, with `unlinkat(parent, name, AT_REMOVEDIR)`, each relative to the
+  descriptor of the directory that was listed. Nothing in the walk can be
+  redirected by a link planted or swapped while it runs, inside or outside the
+  workflow directory, because no step follows one. This is the strategy
+  `os.RemoveAll` itself uses on Unix, with two additions: the request context
+  is checked between entries, and the device check below runs on each opened
+  descriptor, with the entry descriptor from step 3 as the baseline. `os.Root`
+  is not used for the walk: its sub-root open follows a link that stays inside
+  the root, which is exactly the swap that must not be followed. The primitives
+  come from `golang.org/x/sys/unix`, already an indirect dependency of the
+  module, and the walk is Unix-only like the lock implementation beside it.
 - **Device boundary, bound to the handle.** After each `openat`, the walk
-  `fstat`s the opened descriptor, confirms it is a directory, and compares
-  its device id with the workflow directory's, itself taken by `fstat` of
-  its own opened descriptor. Only if they match does the walk list and
-  remove through that descriptor; otherwise it is closed and the directory
-  is left in place and logged. Checking the opened descriptor rather than a
-  path closes the window between a check and an open: a mount placed over
-  the directory after the descriptor was opened does not change what the
-  descriptor refers to, and one placed before it is what the `fstat` sees.
-  This refuses every mount a same-user process can make visible to
-  Counterpoint: a FUSE or disk-image mount has its own device id, and a
-  bind mount made in an unprivileged user namespace on Linux exists only
-  in that namespace's mount table and is invisible to Counterpoint's
-  process. A bind mount in Counterpoint's own mount namespace needs
-  privileges the user does not have and is outside the threat model, as it
-  is for every file operation in this package.
+  `fstat`s the opened descriptor, confirms it is a directory, and compares its
+  device id with the entry descriptor's from step 3. Only if they match does
+  the walk list and remove through that descriptor; otherwise it is closed and
+  the directory is left in place and logged. Checking the opened descriptor
+  rather than a path closes the window between a check and an open: a mount
+  placed over the directory after the descriptor was opened does not change
+  what the descriptor refers to, and one placed before it is what the `fstat`
+  sees. This refuses every mount a same-user process can make visible to
+  Counterpoint: a FUSE or disk-image mount has its own device id, and a bind
+  mount made in an unprivileged user namespace on Linux exists only in that
+  namespace's mount table and is invisible to Counterpoint's process. A bind
+  mount in Counterpoint's own mount namespace needs privileges the user does
+  not have and is outside the threat model, as it is for every file operation
+  in this package.
 
 The same-device decision is a predicate the walk takes, called with the
 `fstat` result of the opened handle and nothing else, so tests exercise the
@@ -251,6 +265,9 @@ context-aware traversal, because caches are the only large trees.
 - A lock file replaced by a symbolic link, or hard-linked to an outside
   file, between the ownership check and the lock: the sweep skips the
   entry, opens nothing outside the tree, and removes nothing.
+- A candidate directory renamed away and replaced by another directory,
+  or by a link, after it was listed: the sweep either works on the
+  directory it opened or skips the entry; the replacement is untouched.
 - Cancelled trash is reachable: an entry with leftover `trash-*` and no
   stamp or cache is still visited, and only its trash is removed.
 - The device boundary: a directory inside trash for which the same-device
