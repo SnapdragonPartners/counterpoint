@@ -148,9 +148,12 @@ plant a trash entry there, so it would prove nothing more than the lock
 file already does. The reviewer's sandbox cannot plant anything: its
 writable roots are `cache` and `tmp` only, never the workflow directory
 itself. What the rules do guarantee, for a planted entry as for a real one,
-is that removal stays inside the workflow directory: only direct children
-are renamed, links are unlinked and never followed, and the walk crosses
-no mount point.
+is that removal never follows a link: only direct children are renamed,
+and the walk unlinks symbolic links rather than descending through them.
+A mount point planted inside a trash tree is not defended against, and no
+claim is made that it is: creating a mount needs privileges the user does
+not have, so it lies outside the same-user threat model this package
+assumes, exactly as for the `os.RemoveAll` in `removeOwned` today.
 
 A sweep failure on one entry is logged and the sweep continues; a sweep
 never fails the review, except that cancellation of the request ends it
