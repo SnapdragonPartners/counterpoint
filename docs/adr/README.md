@@ -26,4 +26,4 @@ Front matter follows the Maestro convention: `title`, `edit_date`, `status`
 
 | ADR | Title | Status | Summary |
 | --- | --- | --- | --- |
-| [0001](0001-threat-model.md) | Threat Model | Accepted | The adversaries Counterpoint defends against are untrusted inputs and the sandboxed reviewer, not a hostile process running as the user; what that rules in and out for filesystem, state, and lock handling. |
+| [0001](0001-threat-model.md) | Threat Model | Proposed | The adversaries Counterpoint defends against are untrusted inputs and the sandboxed reviewer, not a hostile process running as the user; what that rules in and out for filesystem, state, and lock handling. |
