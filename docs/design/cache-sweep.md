@@ -304,8 +304,12 @@ context-aware traversal, because caches are the only large trees.
   file: untouched.
 - `Prepare` writes the stamp before creating the checkout and refreshes it
   on every round.
-- A removal error on one entry (a symlinked `cache` inside it) is logged
-  and does not fail `Prepare` or stop the sweep of other entries.
+- A removal error on one entry is logged and does not fail `Prepare` or
+  stop the sweep of other entries. The failing boundary is deterministic: a
+  `trash-*` directory whose mode denies write permission, so `unlinkat` of
+  its contents fails for the unprivileged test process; the test restores
+  the mode afterwards. A symlinked item cannot serve here, since the rename
+  step skips links before anything can fail.
 - The sweep honors context cancellation between entries.
 
 ## Documentation
