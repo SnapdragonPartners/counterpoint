@@ -239,11 +239,15 @@ func sweepEntry(ctx context.Context, rootFile *os.File, name string, now time.Ti
 				continue // absent
 			}
 			if ist.Mode&unix.S_IFMT == unix.S_IFLNK {
-				return sweptLive, fmt.Errorf("%w: %s", ErrUnexpectedSymlink, filepath.Join(dir.Name(), item))
+				// Not Counterpoint's to move: left in place, and the other
+				// items and any trash are still handled.
+				log.Warn("scratch sweep: linked item left in place", "path", filepath.Join(dir.Name(), item))
+				continue
 			}
 			trash := trashPrefix + randomSuffix()
 			if err := unix.Renameat(fd, item, fd, trash); err != nil {
-				return sweptLive, fmt.Errorf("rename %s to trash: %w", item, err)
+				log.Warn("scratch sweep: item not moved to trash", "path", filepath.Join(dir.Name(), item), "error", err)
+				continue
 			}
 			sweptLive = true
 		}

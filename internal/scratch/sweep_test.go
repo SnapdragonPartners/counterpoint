@@ -509,3 +509,47 @@ func TestSweepLogsARemovalErrorAndContinues(t *testing.T) {
 		t.Errorf("swept = %d", swept)
 	}
 }
+
+// A link at a live-item name is left in place and does not stop the rest
+// of the entry from being swept.
+func TestSweepSkipsALinkedLiveItemAndSweepsTheRest(t *testing.T) {
+	root := newRoot(t)
+	dir := fakeWorkflow(t, root, workflowDirName("linked-item"), 4*24*time.Hour, true)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(outside, dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The link sits at the first name the sweep visits (the cache), so
+	// every other item comes after it; the real cache moves to hooks.
+	if err := os.Rename(filepath.Join(dir, cacheName), filepath.Join(dir, hooksName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, cacheName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, trashPrefix+"old", "d"), dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	prepareOther(t, root, sweepHooks{})
+	if exists(filepath.Join(dir, hooksName)) || exists(filepath.Join(dir, usedName)) {
+		t.Error("items after the linked one were not swept")
+	}
+	if exists(filepath.Join(dir, trashPrefix+"old")) {
+		t.Error("trash not removed after the linked item")
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), trashPrefix) {
+			t.Errorf("new trash %s left behind", e.Name())
+		}
+	}
+	if info, err := os.Lstat(filepath.Join(dir, cacheName)); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("linked item removed or followed: %v %v", info, err)
+	}
+	if !exists(filepath.Join(outside, "f")) {
+		t.Error("link target touched")
+	}
+}
