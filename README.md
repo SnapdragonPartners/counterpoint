@@ -126,9 +126,10 @@ Without Homebrew, download the archive for your platform from the
 check it against `checksums.txt`, put `counterpoint` on `PATH`, and run the
 same `claude mcp add` line. The binaries are not signed, so on macOS a
 browser download carries the quarantine attribute and Gatekeeper blocks the
-first launch; clear it with `xattr -d com.apple.quarantine counterpoint`
-(a `curl` download is not quarantined, and the Homebrew cask clears it for
-you). With a Go toolchain,
+first launch; once it is on `PATH`, clear it with
+`xattr -d com.apple.quarantine "$(command -v counterpoint)"` (a `curl`
+download is not quarantined, and the Homebrew cask clears it for you). With
+a Go toolchain,
 `go install github.com/SnapdragonPartners/counterpoint/cmd/counterpoint@latest`
 also works, but reports the version as `dev`. The registration stores only the
 command name, resolved on `PATH` each session, so it is a once-per-machine
