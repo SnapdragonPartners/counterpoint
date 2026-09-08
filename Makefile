@@ -1,4 +1,4 @@
-.PHONY: build install register test lint vet fmt fmt-check check install-lint install-hooks schema clean
+.PHONY: build install register snapshot test lint vet fmt fmt-check check install-lint install-hooks schema clean
 
 GOLANGCI_LINT_VERSION := v1.64.8
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -50,6 +50,11 @@ register:
 		claude mcp add -s user counterpoint -- counterpoint \
 			&& echo "registered counterpoint with Claude Code at user scope; restart Claude Code to pick it up"; \
 	fi
+
+# Builds every release artifact into dist/ without tagging or publishing,
+# the local check of .goreleaser.yaml; needs goreleaser on PATH.
+snapshot:
+	goreleaser release --snapshot --clean
 
 test:
 	go test -race -cover ./...
