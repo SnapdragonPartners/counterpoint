@@ -26,9 +26,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The release is built from the tagged commit, which CI already
-      # checked on its way into main; this guards against a tag placed
-      # elsewhere.
+      # Releases come only from commits already reviewed and merged into
+      # main. A tag placed on any other commit fails here before anything
+      # is built or published. fetch-depth 0 above makes origin/main
+      # available.
+      - name: Require the tagged commit to be on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main; releases are cut only from main"
+            exit 1
+          fi
+
+      # CI already checked the commit on its way into main; re-running is
+      # cheap insurance that the release build sees the same result.
       - name: Check
         run: make check
 
