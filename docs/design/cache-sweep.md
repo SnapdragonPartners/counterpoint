@@ -137,6 +137,21 @@ For each direct child of the canonical root:
    leaves a `trash-*` directory behind, which step 4 makes a candidate for
    the next sweep of any build-capable review. Release the lock.
 
+Ownership is established once, for the workflow directory, by step 3. Inside
+a directory Counterpoint created, the fixed names `checkout`, `tmp`,
+`hooks`, `cache`, `used`, and `trash-*` are Counterpoint's namespace, and
+the sweep removes them by name exactly as `Prepare` and `Close` already
+remove `checkout`, `tmp`, and `hooks` by name on every round. A marker
+proving that a particular trash entry was Counterpoint's would be a file
+written into that same directory and could be forged by anyone able to
+plant a trash entry there, so it would prove nothing more than the lock
+file already does. The reviewer's sandbox cannot plant anything: its
+writable roots are `cache` and `tmp` only, never the workflow directory
+itself. What the rules do guarantee, for a planted entry as for a real one,
+is that removal stays inside the workflow directory: only direct children
+are renamed, links are unlinked and never followed, and the walk crosses
+no mount point.
+
 A sweep failure on one entry is logged and the sweep continues; a sweep
 never fails the review, except that cancellation of the request ends it
 like every other stage. The log records the number of workflows swept.
