@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes binaries, checksums, and the Homebrew formula on a version
+# Publishes binaries, checksums, and the Homebrew cask on a version
 # tag. Tag from an approved main commit: `git tag -a vX.Y.Z -m ... && git
 # push origin vX.Y.Z`. See .goreleaser.yaml.
 on:

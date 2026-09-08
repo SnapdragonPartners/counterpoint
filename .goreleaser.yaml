@@ -4,9 +4,11 @@
 version: 2
 project_name: counterpoint
 
+# Non-mutating: the artifacts must come from exactly the tagged tree.
+# Tidiness is enforced by make check, which the release workflow runs first.
 before:
   hooks:
-    - go mod tidy
+    - go mod download
 
 builds:
   - id: counterpoint
