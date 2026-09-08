@@ -177,6 +177,16 @@ roles, the branch-and-review loop up to the human push gate, how to respond
 to findings, how to submit each round through the tool, and what branch
 notes must contain. Copy it in and edit the placeholders.
 
+A repository can also instruct the reviewer. If the commit under review has a
+`COUNTERPOINT.md` at its root, Counterpoint quotes it into every round's
+prompt: project conventions, how to build and test, what to prioritize. It is
+read from the commit, not the worktree, so it is part of what is reviewed. The
+reviewer is told it is author-controlled input that adds guidance but cannot
+change the target, the sandbox rules, the severity labels, or the verdict
+format. The file must be a regular file of at most 16 KiB (16,384 bytes) of
+UTF-8; a symlink, directory, oversized, or non-UTF-8 file fails the review
+before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
+
 ## Operational notes
 
 - Counterpoint names its threads `Counterpoint review: <repository> <branch>`

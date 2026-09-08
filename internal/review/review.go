@@ -267,11 +267,24 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 		}, nil
 	}
 
+	// The repository's own reviewer instructions come from the commit under
+	// review, so they are part of the immutable target and, through the
+	// commit, of the request identity. An unusable file fails the request
+	// before the reviewer is started.
+	instructions, err := repo.ReadInstructions(ctx, target.Commit)
+	if err != nil {
+		return nil, err
+	}
+	if instructions != "" {
+		s.log.Info("project instructions included", "request", requestID, "workflow", key, "file", gitrepo.InstructionsFile, "bytes", len(instructions))
+	}
+
 	round := wf.Round + 1
 	prompt := Prompt{
 		Round: round, Worktree: repo.Worktree, BranchRef: branch.Ref, Commit: target.Commit,
 		Base: target.Base, PrimaryName: target.PrimaryName, PrimaryRef: target.PrimaryRef,
 		PreviousTip: wf.LastCommit, HistoryRewritten: target.HistoryRewritten, BranchNotes: req.BranchNotes,
+		Instructions: instructions,
 	}
 	// The reviewer starts every round without memory (issue #19), so the
 	// retained verdicts and the previous round's review are quoted into
