@@ -64,34 +64,68 @@ until after the child has exited.
 
 ### The state lock
 
-The existing `state.json.lock`, now held only around each read-modify-write
-of the state file, which takes milliseconds:
+The existing `state.json.lock`, now held only around each read or
+read-modify-write of the state file, each of which takes milliseconds and
+runs no Git or Codex:
 
-1. At the start: acquire, `Load`, take this workflow's record and decide
-   replay, release.
-2. At the end: acquire, `Load` again, `Put` this workflow's completed record
-   into the fresh state, run the size-pressure eviction if needed, `Save`
-   atomically, release.
+1. At the start, under the workflow lock: acquire, `Load`, copy this
+   workflow's record, release. Everything that follows in setup, including
+   `ValidateTarget` with its Git subprocesses, the request hash, the replay
+   decision, and reading `COUNTERPOINT.md`, runs under the workflow lock
+   alone. The copy is stable because the workflow lock excludes any other
+   round of this workflow; nothing else may change this record. The wait is
+   the existing two seconds.
+2. At the end, after the Codex turn: acquire, `Load` again, reconcile (below),
+   `Put` this workflow's completed record into the fresh state, run the
+   size-pressure eviction if needed, `Save` atomically, release. The wait
+   here is separate and longer, thirty seconds bounded by the request
+   context, because a review has been paid for by then and the holder may
+   legitimately be another process finishing at the same moment: encoding,
+   syncing, renaming, and up to two eviction retries.
 
 Reloading before the final save is what protects entries other reviews
-wrote in the meantime. The replay decision made from the first read stays
-valid at the second because the workflow lock excludes any other round of
-this workflow between them; nothing else may change this record. If the
-fresh read nevertheless shows this workflow's record changed, a writer
-bypassed the workflow lock (a foreign process or an older Counterpoint), and
-the save is refused with `ErrStateInvalid` rather than overwriting.
+wrote in the meantime.
+
+#### Reconciling the final read
+
+Two things may legitimately differ between the record copied at the start
+and the one read at the end, and one may not:
+
+- The record's **history** may have been cleared by another review's
+  second-stage size-pressure eviction, which clears every workflow's history
+  to fit a completed review into the file. That eviction is compliant with
+  the invariants: history is derived convenience data, replay fields are
+  never touched. The final save therefore builds this round's history from
+  the **fresh** record's history plus the record of the round just
+  superseded, not from the copy taken at the start, so an eviction is
+  honored rather than resurrected. If the result still does not fit, this
+  review's own eviction runs as today.
+- Records of **other workflows** may have been added, replaced, or had
+  their history cleared. They are carried as read.
+- This workflow's **replay fields** (thread id, last commit, base, request
+  hash, round, last review, last warnings) may not differ. A difference means
+  a writer bypassed the workflow lock, a foreign process or an older
+  Counterpoint, and the save is refused with `ErrStateInvalid` rather than
+  overwriting. Losing the completed review is the same outcome as any other
+  failed save today, and this path is reached only in a mixed-version or
+  hostile situation.
 
 Failure to take the state lock uses the same `ErrLocked` sentinel with the
-message "the state file is busy". Because the critical sections are short,
-contention here means an older Counterpoint holding the lock for a full
-review, or a stuck process.
+message "the state file is busy". At the start, contention means an older
+Counterpoint holding the lock for a full review, or a stuck process. At the
+end, the longer wait covers concurrent completions.
 
 ### Ordering
 
-Locks are always taken in the order workflow lock, then state lock, then the
-scratch directory lock, and the state lock is never held while acquiring
-either of the others. No cycle is possible. The scratch directory lock is
-unchanged.
+The workflow lock is the root: it is always taken first and released last.
+The scratch directory lock is taken while holding the workflow lock and,
+as today, held until the checkout is removed at the very end, which is after
+the final state write. The state lock is therefore taken while holding the
+workflow lock and, in a build-capable review, the scratch lock too. It is a
+leaf: it is never held while acquiring any other lock, and it protects only
+the state file. A process waiting on the state lock holds locks nobody else
+can be waiting for while holding the state lock, so no cycle is possible.
+That is the partial order the implementation relies on, not a total order.
 
 ### What runs in parallel
 
@@ -139,10 +173,16 @@ from it; `README.md` already says so, and the release notes will repeat it.
 - This workflow's record changed under the workflow lock by a foreign writer
   makes the final save fail with `ErrStateInvalid` and leaves the file as the
   foreign writer left it.
+- Concurrent size pressure: another review's second-stage eviction clears
+  this in-flight workflow's history; the final save honors it (no history
+  resurrected), records the round, and does not report a conflict.
 - The existing lock tests move to the workflow lock: bounded wait and clear
   failure, and the child terminated before release.
-- The state lock held elsewhere fails the review before anything is spawned,
-  with the busy message.
+- The state lock held elsewhere at the start fails the review before
+  anything is spawned, with the busy message; held at the end for less than
+  the final wait, the save still succeeds.
+- The start-phase state lock is released before `ValidateTarget` runs
+  (observed through a Git operation that checks the lock is free).
 
 ## Documentation
 
