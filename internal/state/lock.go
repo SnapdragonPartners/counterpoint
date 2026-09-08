@@ -14,8 +14,10 @@ import (
 
 const (
 	// LockWait is how long AcquireLock keeps trying before reporting that
-	// another review holds the lock. It is short on purpose: a blocked
-	// caller should fail clearly rather than queue behind a full review.
+	// another process holds the lock. It is the wait for the workflow lock,
+	// the start-phase state lock, and the scratch directory lock, and is
+	// short on purpose: a blocked caller should fail clearly rather than
+	// queue behind a full review.
 	LockWait = 2 * time.Second
 	// FinalSaveLockWait bounds waiting for the state lock when a completed
 	// review is being recorded. It is longer than LockWait because the
