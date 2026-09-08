@@ -150,30 +150,41 @@ writable roots are `cache` and `tmp` only, never the workflow directory
 itself. What the rules guarantee, for a planted entry as for a real one, is
 that removal never leaves the workflow directory, by two mechanisms:
 
-- **Rooted traversal.** The trash walk runs inside an `os.Root` opened on
-  the workflow directory (Go 1.24 and later): every open, `Lstat`, and
-  `Remove` is resolved relative to that root with `openat` semantics, so a
-  symbolic link cannot redirect the walk outside it even if a link is
-  planted or a directory is renamed while the walk is in progress, which a
-  path-based `Lstat`-then-descend cannot promise. Links are unlinked, not
-  followed; directories are removed post-order with `Remove`, never
-  `RemoveAll`, so the context is checked between entries.
-- **Device boundary, bound to the handle.** The walk descends into a
-  child directory by opening it as a sub-root, then `fstat`s that opened
-  handle and compares the device id with the workflow directory's, which
-  was taken the same way from its own opened root. Only if they match does
-  the walk list and remove through that handle; otherwise the handle is
-  closed and the directory is left in place and logged. Checking the
-  opened handle rather than a path closes the window between a check and
-  an open: a mount placed over the directory after the handle was opened
-  does not change what the handle refers to, and a mount placed before it
-  is what the `fstat` sees. This refuses every mount a same-user process
-  can make visible to Counterpoint: a FUSE or disk-image mount has its own
-  device id, and a bind mount made in an unprivileged user namespace on
-  Linux exists only in that namespace's mount table and is invisible to
-  Counterpoint's process. A bind mount in Counterpoint's own mount
-  namespace needs privileges the user does not have and is outside the
-  threat model, as it is for every file operation in this package.
+- **Descriptor traversal.** The trash walk never resolves a path more than
+  one component long. Starting from a descriptor for the workflow
+  directory, each child directory is opened with `openat(parent, name,
+  O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`, so a name that has become a
+  symbolic link, wherever it points, fails to open and is unlinked as a
+  link instead of being entered; entries are listed through the opened
+  descriptor; files and links are removed with `unlinkat(parent, name, 0)`
+  and directories, post-order, with `unlinkat(parent, name,
+  AT_REMOVEDIR)`, each relative to the descriptor of the directory that
+  was listed. Nothing in the walk can be redirected by a link planted or
+  swapped while it runs, inside or outside the workflow directory, because
+  no step follows one. This is the strategy `os.RemoveAll` itself uses on
+  Unix, with two additions: the request context is checked between
+  entries, and the device check below runs on each opened descriptor.
+  `os.Root` is not used for the walk: its sub-root open follows a link
+  that stays inside the root, which is exactly the swap that must not be
+  followed. The primitives come from `golang.org/x/sys/unix`, already an
+  indirect dependency of the module, and the walk is Unix-only like the
+  lock implementation beside it.
+- **Device boundary, bound to the handle.** After each `openat`, the walk
+  `fstat`s the opened descriptor, confirms it is a directory, and compares
+  its device id with the workflow directory's, itself taken by `fstat` of
+  its own opened descriptor. Only if they match does the walk list and
+  remove through that descriptor; otherwise it is closed and the directory
+  is left in place and logged. Checking the opened descriptor rather than a
+  path closes the window between a check and an open: a mount placed over
+  the directory after the descriptor was opened does not change what the
+  descriptor refers to, and one placed before it is what the `fstat` sees.
+  This refuses every mount a same-user process can make visible to
+  Counterpoint: a FUSE or disk-image mount has its own device id, and a
+  bind mount made in an unprivileged user namespace on Linux exists only
+  in that namespace's mount table and is invisible to Counterpoint's
+  process. A bind mount in Counterpoint's own mount namespace needs
+  privileges the user does not have and is outside the threat model, as it
+  is for every file operation in this package.
 
 The same-device decision is a predicate the walk takes, called with the
 `fstat` result of the opened handle and nothing else, so tests exercise the
@@ -249,7 +260,9 @@ context-aware traversal, because caches are the only large trees.
   inode it sees is the directory's, and a refused directory is never
   listed.
 - A symbolic link inside trash pointing outside the workflow directory is
-  unlinked and its target is untouched.
+  unlinked and its target is untouched; so is one pointing at a sibling
+  subtree inside the workflow directory, such as the live `cache`, which
+  keeps its contents.
 - Freshness under the lock: a stamp refreshed after the age check but
   before the lock is taken leaves the entry untouched.
 - Cancellation during the removal of a large candidate returns promptly,
