@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,10 @@ type Options struct {
 	// LockWait bounds waiting for the workflow directory's lock;
 	// state.LockWait when zero.
 	LockWait time.Duration
+	// Logger receives the sweep's diagnostics; discarded when nil.
+	Logger *slog.Logger
+
+	hooks sweepHooks // test seams
 }
 
 // Checkout is a prepared disposable checkout. Close removes it.
@@ -143,6 +148,24 @@ func Prepare(ctx context.Context, opts Options) (co *Checkout, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("scratch: %w", err)
 	}
+	// The workflow is in use now: stamp it, then sweep the root of other
+	// workflows unused for MaxCacheAge (docs/design/cache-sweep.md). The
+	// sweep runs here, before the clone, so a crashed or cancelled round
+	// cannot skip it, and it never fails Prepare.
+	if err := stamp(workflowDir); err != nil {
+		_ = lock.Release()
+		return nil, err
+	}
+	log := opts.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	sweep(ctx, root, filepath.Base(workflowDir), time.Now(), log, opts.hooks)
+	if err := ctx.Err(); err != nil {
+		_ = lock.Release()
+		return nil, fmt.Errorf("scratch: %w", err)
+	}
+
 	co = &Checkout{
 		Dir:         filepath.Join(workflowDir, checkoutName),
 		CacheDir:    filepath.Join(workflowDir, cacheName),

@@ -16,8 +16,10 @@ Use the source appropriate to the question. For current behavior, precedence is:
 
 1. Code and tests.
 2. `docs/MVP.md` for the accepted MVP contract.
-3. `README.md` for orientation.
-4. Issues and discussion as non-binding context.
+3. Accepted ADRs in `docs/adr/` for cross-cutting decisions such as the
+   threat model; per-issue design records in `docs/design/` build on them.
+4. `README.md` for orientation.
+5. Issues and discussion as non-binding context.
 
 When code and the MVP specification differ, code describes the current runtime
 and the specification describes the intended MVP. Do not silently resolve the
@@ -158,7 +160,10 @@ the author's claims are correct.
 - Do not claim planned behavior is implemented.
 - Prefer focused documents over duplicating protocol fields, package inventories,
   or state flows in multiple places.
-- Link consequential decisions to their issue or design document.
+- Link consequential decisions to their issue or design document. Record a
+  decision that cuts across issues, such as the threat model or
+  documentation authority, as an ADR in `docs/adr/` (see its `README.md`
+  for the lifecycle), and cite it rather than re-deriving it.
 
 ## Development and verification
 
@@ -245,6 +250,9 @@ Counterpoint is local software, but local does not mean trusted. Block command
 injection, unsafe filesystem targeting, symlink confusion, protocol spoofing,
 unbounded message growth, accidental write permissions, and committed secrets.
 Apply controls proportionately; do not add unrelated enterprise machinery.
+The adversaries are untrusted inputs and the sandboxed reviewer, not a
+hostile process running as the user: see ADR 0001 (`docs/adr/`) before
+designing or reviewing a defense.
 
 Tests should materially reduce risk, especially around JSONL dispatch,
 subprocess lifecycle, cancellation, Git identity, ref and commit validation,

@@ -332,7 +332,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	var checkout *scratch.Checkout
 	if req.Build {
 		checkout, err = scratch.Prepare(ctx, scratch.Options{
-			Root: s.checkoutRoot, WorkflowKey: key, Repo: repo, Commit: target.Commit,
+			Root: s.checkoutRoot, WorkflowKey: key, Repo: repo, Commit: target.Commit, Logger: s.log,
 		})
 		if err != nil {
 			return nil, err

@@ -21,7 +21,8 @@ Issues rather than here:
   checkout, described under "Review target" and "Sandbox and approvals" and
   designed in `docs/design/disposable-checkout.md`. Retention of its build
   cache is
-  [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
+  [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15),
+  the sweep designed in `docs/design/cache-sweep.md`.
 - [Issue 19](https://github.com/SnapdragonPartners/counterpoint/issues/19):
   Codex's review mode starts each round from a fresh history, so the
   reviewer never saw its earlier verdicts. Resolved by the review ledger
@@ -198,7 +199,16 @@ instead of the user's worktree:
    is removed. The lock is keyed to the directory rather than to the state
    file, because two installations with different state files could share
    the default root. The cache is checked for a symlink after creation,
-   since it persists and is handed to Codex as a writable root.
+   since it persists and is handed to Codex as a writable root. Each
+   build-capable review stamps its workflow directory as used and sweeps
+   the root: a workflow unused for 72 hours loses its cache, checkout
+   remnants, temp, hooks, and stamp, leaving the directory and its lock
+   file as a tombstone; a workflow's lock file is the proof that
+   Counterpoint made the directory, entries in use elsewhere are skipped
+   without waiting, and removal is descriptor-relative, never follows a
+   link, and refuses directories on another device
+   ([issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15),
+   `docs/design/cache-sweep.md`, threat model in ADR 0001).
 3. The checkout is a shared, no-checkout clone of the repository's common
    directory with the commit checked out detached, populated with the user's
    global and system Git configuration ignored, no templates, and hooks
@@ -648,8 +658,18 @@ Unit tests cover:
   one workflow directory; replacement of a crashed round's checkout; the
   temp directory created beside the checkout and removed with it; checkout
   removal on
-  a completed, failed, and cancelled review with the cache kept; and the
-  warning for tracked files changed during the turn;
+  a completed, failed, and cancelled review with the cache kept; the
+  warning for tracked files changed during the turn; and the cache sweep:
+  a stale workflow swept to a tombstone and usable again, fresh and
+  unknown entries kept, the cache mtime used without a stamp, the current
+  workflow skipped and its stamp refreshed, a held lock skipped without
+  waiting, lookalike and foreign entries ignored with no lock file created,
+  a linked stamp replaced without touching its target, a swapped lock
+  skipped, the age re-checked under the lock, leftover trash removed on
+  its own, links inside trash unlinked and not followed, a directory
+  refused by the device check left in place, cancellation mid-walk leaving
+  trash a later sweep removes, and a removal error logged without stopping
+  the sweep;
 - `COUNTERPOINT.md`: read from the named commit rather than the worktree,
   absent and blank treated as none, an executable blob accepted, and
   rejection of a symbolic link, a directory, an oversized file, and invalid
@@ -740,10 +760,8 @@ The MVP is accepted when a clean local demonstration can:
   instruction file described under "Review request".
 - A configurable review timeout.
 - Branch lifecycle management and automatic state garbage collection.
-- Eviction of the per-workflow build cache kept by build-capable reviews,
-  tracked as
-  [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15)
-  because it can be large.
+- A size bound on the scratch root beyond the 72-hour sweep of unused
+  workflow caches.
 - Exact Codex CLI version enforcement.
 - Remote app-server hosts, containers, and cloud execution.
 - Push, pull-request, CI, approval, or merge automation.
