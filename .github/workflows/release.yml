@@ -1,0 +1,42 @@
+name: Release
+
+# Publishes binaries, checksums, and the Homebrew formula on a version
+# tag. Tag from an approved main commit: `git tag -a vX.Y.Z -m ... && git
+# push origin vX.Y.Z`. See .goreleaser.yaml.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the changelog needs the previous tag
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The release is built from the tagged commit, which CI already
+      # checked on its way into main; this guards against a tag placed
+      # elsewhere.
+      - name: Check
+        run: make check
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

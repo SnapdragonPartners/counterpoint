@@ -1,5 +1,6 @@
 # Build output
 bin/
+dist/
 
 # Regenerated codex app-server schema (see `make schema`)
 .schema/

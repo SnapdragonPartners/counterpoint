@@ -112,27 +112,34 @@ to many hours and normally needs no change.
 
 ## Installation and use
 
-Install the binary and register it with Claude Code as a stdio MCP server at
-user scope, so it is available in every project:
+Install the binary, then register it with Claude Code as a stdio MCP server
+at user scope, so it is available in every project. On macOS or Linux with
+Homebrew:
 
 ```bash
-make install
-make register
+brew install SnapdragonPartners/tap/counterpoint
+claude mcp add -s user counterpoint -- counterpoint
 ```
 
-`make install` builds a version-stamped binary into `GOBIN`, or `GOPATH/bin`
-when `GOBIN` is unset; make sure that directory is on `PATH`. `make register`
-runs `claude mcp add -s user counterpoint -- counterpoint` when the name is
-not yet registered at user scope and does nothing otherwise, so it is safe to
-repeat. The
-registration stores only the command name, resolved on `PATH` each session,
-so it is a once-per-machine step that survives later installs. If that
-directory cannot be on `PATH`, register the absolute path by hand instead; the
-target prints the command when `counterpoint` does not resolve. Registering
-the installed binary rather than `bin/counterpoint` keeps the tool stable
-while the repository is being developed: `make build` produces the build
-under test, and `make install` promotes it. MCP servers start with the client
-session, so restart Claude Code after installing a new version.
+Without Homebrew, download the archive for your platform from the
+[releases page](https://github.com/SnapdragonPartners/counterpoint/releases),
+check it against `checksums.txt`, put `counterpoint` on `PATH`, and run the
+same `claude mcp add` line. With a Go toolchain,
+`go install github.com/SnapdragonPartners/counterpoint/cmd/counterpoint@latest`
+also works, but reports the version as `dev`. The registration stores only the
+command name, resolved on `PATH` each session, so it is a once-per-machine
+step that survives upgrades. If the binary's directory cannot be on `PATH`,
+register its absolute path instead. MCP servers start with the client session,
+so restart Claude Code after installing a new version.
+
+From a clone of this repository, `make install` builds a version-stamped
+binary into `GOBIN`, or `GOPATH/bin` when `GOBIN` is unset, and
+`make register` runs the `claude mcp add` line when the name is not yet
+registered at user scope and does nothing otherwise, so it is safe to repeat.
+The target prints the absolute-path command when `counterpoint` does not
+resolve. Registering the installed binary rather than `bin/counterpoint`
+keeps the tool stable while the repository is being developed: `make build`
+produces the build under test, and `make install` promotes it.
 
 Counterpoint exposes one tool, `review`, taking `repo`, `branch`, `commit`,
 `branch_notes`, and an optional `build` flag. It returns the canonical
@@ -186,9 +193,25 @@ make check     # gofmt check, go vet, golangci-lint, go test -race; what CI runs
 make build     # bin/counterpoint, the build under test
 make install   # versioned binary into GOBIN or GOPATH/bin
 make register  # register the installed binary with Claude Code once per machine
+make snapshot  # all release artifacts into dist/, unpublished; needs goreleaser
 make schema    # regenerate the codex app-server JSON schema into .schema/
 make install-hooks  # pre-commit hook that runs make check
 ```
+
+### Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which re-runs
+`make check` on the tagged commit and then runs
+[GoReleaser](https://goreleaser.com) from `.goreleaser.yaml`: static
+binaries for macOS and Linux on amd64 and arm64, tarballs with the license
+and docs, `checksums.txt`, release notes from the commit subjects since the
+previous tag, and the Homebrew cask in `SnapdragonPartners/homebrew-tap`,
+written with the organization secret `HOMEBREW_TAP_TOKEN`. The binaries are
+not signed; the cask clears the quarantine attribute after install so
+Gatekeeper does not block them. Tag only a commit on the primary branch that
+has been reviewed and merged, with an annotated tag: `git tag -a v0.1.1 -m
+"v0.1.1"` then `git push origin v0.1.1`. Verify a config change with
+`make snapshot` before tagging.
 
 ## Name
 
