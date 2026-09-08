@@ -72,6 +72,10 @@ implement a change Claude believes is wrong in order to end the loop.
   The call blocks for the whole Codex turn, typically several minutes.
   Submit every round through the tool; do not ask OWNER to relay when the
   tool is available.
+- Project-specific guidance for the reviewer (how to build and test, what to
+  prioritize) belongs in a `COUNTERPOINT.md` at the repository root, which
+  Counterpoint quotes into every round; keep it short and commit it like any
+  other file.
 - Ask for a build-capable review when a test run is material evidence: code
   changes, especially to concurrency, persistence, protocol handling, or Git
   interaction. Keep documentation-only rounds and small follow-ups read-only.

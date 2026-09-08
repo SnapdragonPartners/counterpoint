@@ -492,6 +492,23 @@ repository is read-only and not the place to run anything.
 The instructions include the Counterpoint round number. Branch notes are
 delimited clearly as untrusted author input.
 
+When the commit under review has a `COUNTERPOINT.md` at its root
+([issue 16](https://github.com/SnapdragonPartners/counterpoint/issues/16)),
+its text is quoted into every round's instructions between the rules and
+the branch notes, delimited like the notes and introduced as
+author-controlled input: the reviewer applies its project-specific
+conventions, build and test guidance, and review priorities, but it cannot
+change the target, the sandbox rules, the severity labels, or the verdict
+format, cannot grant permissions or request input, and cannot excuse a
+finding; the prompt wins on conflict. The file is read from the commit
+object, never a worktree or the disposable checkout, so it is part of the
+immutable target and covered by the request hash through the commit. It
+must be a blob in mode 100644 or 100755 of at most 16 KiB of valid UTF-8;
+a symbolic link, submodule, directory, oversized, or non-UTF-8 file fails
+the request before the app-server is started, and the text is never
+truncated; only trailing newlines are removed, as for the branch notes. A
+blank file is treated as absent.
+
 The instructions may be compiled into the binary for the MVP. Configurable
 prompt paths and templates are deferred.
 
@@ -603,6 +620,13 @@ Unit tests cover:
   removal on
   a completed, failed, and cancelled review with the cache kept; and the
   warning for tracked files changed during the turn;
+- `COUNTERPOINT.md`: read from the named commit rather than the worktree,
+  absent and blank treated as none, an executable blob accepted, and
+  rejection of a symbolic link, a directory, an oversized file, and invalid
+  UTF-8 with no content echoed in the error; its delimited quoting,
+  unchanged apart from trailing newlines, before the branch notes, absence of the section when there is no file,
+  forged delimiters defeated, and a review request whose commit carries an
+  unusable file failing before the reviewer is spawned;
 - merge-base resolution against local and remote-tracking primary branches;
 - rewritten-history detection when the previous tip is no longer an ancestor;
 - stable workflow-key construction across worktrees;
@@ -673,7 +697,8 @@ The MVP is accepted when a clean local demonstration can:
   output-schema option on turn start is a candidate mechanism.
 - An explicit thread reset operation.
 - Configurable prompts, model selection, per-model reasoning-effort selection
-  from the catalog, and per-repository policy files.
+  from the catalog, and per-repository policy beyond the `COUNTERPOINT.md`
+  instruction file described under "Review request".
 - A configurable review timeout.
 - Branch lifecycle management and automatic state garbage collection.
 - Eviction of the per-workflow build cache kept by build-capable reviews,

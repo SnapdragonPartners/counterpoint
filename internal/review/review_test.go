@@ -1196,3 +1196,43 @@ func TestBuildRoundFailsBeforeCodexWhenScratchOverlapsTheRepository(t *testing.T
 		t.Errorf("worktree modified:\n%s", status)
 	}
 }
+
+// The repository's COUNTERPOINT.md is read from the commit under review and
+// quoted into the prompt on every round.
+func TestProjectInstructionsAreQuotedFromTheCommit(t *testing.T) {
+	h := newHarness(t)
+	if err := os.WriteFile(filepath.Join(h.repo.dir, gitrepo.InstructionsFile), []byte("Always run make check.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.repo.git("add", "-A")
+	h.repo.git("commit", "--quiet", "-m", "instructions")
+	tip := h.repo.git("rev-parse", "HEAD")
+	for i := 1; i <= 2; i++ {
+		if _, err := h.svc.Review(context.Background(), h.request(tip, fmt.Sprintf("notes %d", i))); err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+	}
+	block := "<<<COUNTERPOINT.md>>>\nAlways run make check.\n<<<END COUNTERPOINT.md>>>\n"
+	for i, instr := range h.reviewer.instructions {
+		if !strings.Contains(instr, block) {
+			t.Errorf("round %d prompt lacks the quoted instructions:\n%s", i+1, instr)
+		}
+	}
+}
+
+func TestUnusableProjectInstructionsSpawnNothing(t *testing.T) {
+	h := newHarness(t)
+	if err := os.Symlink("feature-1.txt", filepath.Join(h.repo.dir, gitrepo.InstructionsFile)); err != nil {
+		t.Fatal(err)
+	}
+	h.repo.git("add", "-A")
+	h.repo.git("commit", "--quiet", "-m", "symlinked instructions")
+	tip := h.repo.git("rev-parse", "HEAD")
+	_, err := h.svc.Review(context.Background(), h.request(tip, "n"))
+	if !errors.Is(err, gitrepo.ErrInstructionsInvalid) {
+		t.Fatalf("err = %v, want ErrInstructionsInvalid", err)
+	}
+	if h.spawns != 0 {
+		t.Errorf("reviewer spawned %d times", h.spawns)
+	}
+}
