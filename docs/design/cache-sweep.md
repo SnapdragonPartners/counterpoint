@@ -47,11 +47,17 @@ A workflow's cache is kept while the workflow has been used within the last
 72 hours and swept afterwards. Use means a build-capable review of that
 workflow reached `scratch.Prepare`. Nothing else bounds the root.
 
-- A stamp file, `<workflow dir>/used`, is written (created or its
-  modification time updated) by `Prepare` once the workflow's lock is held,
-  before anything else is created. Its modification time is the last-use
-  time. A stamp is one system call to read and one to write, and needs no
-  walk of the cache.
+- A stamp file, `<workflow dir>/used`, is written by `Prepare` once the
+  workflow's lock is held, before anything else is created. Its
+  modification time is the last-use time. The stamp is an owned regular
+  file and is never written through a link: it is inspected with `Lstat`
+  first; a missing stamp is created with `O_CREATE|O_EXCL`; an existing
+  regular file is opened with `O_NOFOLLOW` and rewritten through that
+  descriptor, which updates its modification time; anything else (a
+  symbolic link, a directory) fails `Prepare` with `ErrUnexpectedSymlink`
+  or a clear error, since the scratch tree has been tampered with. Readers
+  apply the same `Lstat` rule and ignore a stamp that is not a regular
+  file. A stamp costs a few system calls and no walk of the cache.
 - A workflow directory from before this change has no stamp. Its last use is
   approximated by the modification time of its `cache` directory, which is
   close to the workflow's first build rather than its last, so an active
@@ -77,34 +83,50 @@ caches, so it costs milliseconds and never blocks on a lock.
 
 For each direct child of the canonical root:
 
-1. Skip anything whose name is not sixteen lower-case hex characters; the
-   root holds only workflow directories Counterpoint made, and anything else
-   is not Counterpoint's to touch.
+1. Skip anything whose name is not sixteen lower-case hex characters, a
+   symbolic link, or not a directory.
 2. Skip the current workflow's directory.
-3. Skip a symbolic link, or an entry that is not a directory.
-4. Read the stamp's modification time, falling back to the `cache`
-   directory's; skip when there is neither (nothing to sweep) or when the
-   time is within 72 hours of now.
-5. Try the entry's scratch lock without waiting (a zero wait). If it is
-   held, another process is reviewing that workflow: skip. Take it
+3. Require proof that Counterpoint made the directory: its `lock` file must
+   already exist as a regular file. Every workflow directory Counterpoint
+   has ever created has one, because `Prepare` creates it before anything
+   else. A hash-shaped name is not provenance: `COUNTERPOINT_CHECKOUT_DIR`
+   may point at an existing or shared directory, and a foreign entry there
+   must never be touched, nor have a lock file created in it. The sweep
+   therefore never creates a lock file; it only opens one that exists.
+4. Read the stamp's modification time (an owned regular file, as above),
+   falling back to the `cache` directory's; skip when there is neither
+   (nothing to sweep) or when the time is within 72 hours of now.
+5. Try the entry's existing scratch lock without waiting (a zero wait). If
+   it is held, another process is reviewing that workflow: skip. Take it
    otherwise, so no review can start there during the removal.
-6. Under that lock, remove the entry's `cache`, `checkout`, `tmp`, `hooks`,
-   and `used` with the same owned-child, not-a-link rule as today. Release
-   the lock.
-
-The workflow directory and its lock file are left in place as a tombstone:
-an empty directory and a zero-byte file. Deleting the lock file would
-create the classic unlink race, where a process that opened the lock path
-just before the deletion holds a lock on a vanished inode while a later
-process creates a new one at the same path and both believe they are
-exclusive; keeping the lock file's inode stable keeps the existing lock
-semantics exact. A tombstone costs bytes, is recognized by step 4 as having
-nothing to sweep, and is reused unchanged when the branch is reviewed again.
+6. Under that lock, re-read the stamp and fallback time and skip if it is
+   now within 72 hours: a `Prepare` in another process may have refreshed
+   it between step 4 and the lock, and the age decision is only valid
+   under the lock.
+7. Under that lock, for each of the entry's `cache`, `checkout`, `tmp`,
+   `hooks`, and `used`, apply the owned-child, not-a-link rule, then rename
+   the item to `trash-<random>` inside the same workflow directory. A
+   rename is one atomic system call, so the item is out of use the instant
+   it is decided, whatever happens next.
+8. Remove every `trash-*` entry in the workflow directory with a
+   context-aware walk: files are unlinked and directories removed
+   post-order, checking the request context between entries, so a
+   cancelled request leaves `Prepare` within a bounded number of
+   operations instead of holding two scratch locks for a traversal of a
+   multi-gigabyte cache. A walk interrupted by cancellation leaves a
+   `trash-*` directory behind, which any later sweep of that entry removes
+   the same way; a tombstone with trash is therefore still a candidate.
+   Release the lock.
 
 A sweep failure on one entry is logged and the sweep continues; a sweep
-never fails the review. The log records the number of workflows swept.
-Sizes are not reported, since measuring them would mean the walk the design
-avoids.
+never fails the review, except that cancellation of the request ends it
+like every other stage. The log records the number of workflows swept.
+Sizes are not reported, since measuring them would mean an extra walk.
+
+The scratch package's existing `removeOwned`, built on `os.RemoveAll`,
+stays for the per-round removal of the checkout, temp, and hooks
+directories, which are small; the sweep's trash removal is the only
+context-aware traversal, because caches are the only large trees.
 
 ### What the sweep does not do
 
@@ -142,6 +164,16 @@ avoids.
   `checkout`, `tmp`, `hooks`, and `used` removed; the directory and its lock
   file remain; a later `Prepare` for that workflow succeeds with a fresh
   cache and a new stamp.
+- A lookalike: a sixteen-hex directory under the root with an old `cache`
+  and no lock file is untouched, and no lock file is created in it.
+- A stamp that is a symbolic link: `Prepare` refuses with
+  `ErrUnexpectedSymlink` and the link's target is neither truncated nor
+  retimestamped; the sweep ignores such a stamp as absent.
+- Freshness under the lock: a stamp refreshed after the age check but
+  before the lock is taken leaves the entry untouched.
+- Cancellation during the removal of a large candidate returns promptly,
+  leaves a `trash-*` directory and the tombstone, releases both locks, and
+  a later sweep removes the trash.
 - A stamp younger than 72 hours: untouched.
 - No stamp: the `cache` directory's modification time decides; neither
   stamp nor cache: untouched.
