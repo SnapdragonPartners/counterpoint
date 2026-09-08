@@ -153,6 +153,15 @@ writing the stamp, and the stamp write is an exclusive create plus a rename
 inside that directory. The sweep is the only code that judges directories
 it did not just create, which is why it alone works through descriptors.
 
+The threat model is ADR 0001 (`docs/adr/0001-threat-model.md`): untrusted
+inputs and the sandboxed reviewer, not a hostile process running as the
+user. The descriptor discipline above is what the reviewer's reach
+requires, since it can plant links and, on some platforms, mounts inside
+its writable roots; races that need the user's own authority, such as a
+workflow directory renamed out of the root between being judged and being
+removed, are out of scope per that ADR and are neither mitigated nor
+tested.
+
 Ownership is established once, for the workflow directory, by step 4. Inside
 a directory Counterpoint created, the fixed names `checkout`, `tmp`,
 `hooks`, `cache`, `used`, and `trash-*` are Counterpoint's namespace, and
