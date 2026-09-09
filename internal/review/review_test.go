@@ -1652,3 +1652,156 @@ func TestUnusableProjectInstructionsSpawnNothing(t *testing.T) {
 		t.Errorf("reviewer spawned %d times", h.spawns)
 	}
 }
+
+// historyRecordBytes must never understate what evicting a record frees
+// from the encoded file, or a record could be evicted when the file would
+// already fit. Checked against real encodings, including escape-heavy
+// text, a placeholder record, and the last record of a history, whose
+// removal also drops the history field.
+func TestHistoryRecordBytesIsAnUpperBoundOnTheEncodedSize(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	reviews := map[string]string{
+		"plain":       strings.Repeat("r", 3000),
+		"escaped":     strings.Repeat("\"\\\n\t<>&\x01", 500),
+		"unicode":     strings.Repeat("é漢字🙂", 400),
+		"empty":       "",
+		"placeholder": "",
+	}
+	for name, text := range reviews {
+		rec := state.HistoryRecord{Round: 1, Commit: oid, Base: oid, Review: text}
+		if name == "placeholder" {
+			rec.Omitted = state.OmittedTooLarge
+		}
+		for _, alone := range []bool{true, false} {
+			history := []state.HistoryRecord{rec}
+			if !alone {
+				history = append(history, state.HistoryRecord{Round: 2, Commit: oid, Base: oid, Review: "other"})
+			}
+			with := encodedSize(t, history)
+			without := encodedSize(t, history[1:])
+			if freed := with - without; freed > historyRecordBytes(rec) {
+				t.Errorf("%s alone=%v: evicting frees %d bytes but the estimate is %d", name, alone, freed, historyRecordBytes(rec))
+			}
+		}
+	}
+}
+
+// encodedSize is the state file size for one workflow (round 3, so a
+// two-record history is valid) with the given history.
+func encodedSize(t *testing.T, history []state.HistoryRecord) int {
+	t.Helper()
+	oid := strings.Repeat("a", 40)
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) == 0 {
+		history = nil
+	}
+	st.Put("w", state.Workflow{ThreadID: "t", LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 3, LastReview: "newest", History: history})
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(info.Size())
+}
+
+// The eviction loop runs under the state lock and must stop when the
+// request is cancelled, leaving the file as it was.
+func TestHistoryEvictionHonorsCancellation(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(tip, "one")); err != nil {
+		t.Fatal(err)
+	}
+	st, err := h.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oid := strings.Repeat("e", 40)
+	st.Put("other", state.Workflow{ThreadID: "thr_other", LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 2, LastReview: "s",
+		History: []state.HistoryRecord{{Round: 1, Commit: oid, Base: oid, Review: strings.Repeat("r", 20<<10)}}})
+	if err := h.store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	fillStateTo(t, h.store)
+	before, _ := os.Stat(h.store.Path())
+
+	// Reload so the store is in the loaded state, then push it over the
+	// limit and ask for a save with a cancelled context.
+	st, err = h.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler, _ := st.Get("filler")
+	filler.LastReview += strings.Repeat("x", 4<<10)
+	st.Put("filler", filler)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = h.svc.saveEvictingHistory(ctx, st, "filler", "t")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	after, _ := os.Stat(h.store.Path())
+	if after.Size() != before.Size() {
+		t.Errorf("state file changed from %d to %d bytes under a cancelled context", before.Size(), after.Size())
+	}
+	if got, _ := loadState(t, h.store).Get("other"); len(got.History) != 1 {
+		t.Errorf("other workflow's history evicted despite cancellation: %+v", got)
+	}
+}
+
+func loadState(t *testing.T, store *state.Store) *state.State {
+	t.Helper()
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// With the overshoot just under one record's estimate, exactly one record
+// is evicted: the loop must stop as soon as the estimate covers the
+// overshoot, not keep going for margin.
+func TestHistoryEvictionStopsAsSoonAsTheEstimateCoversTheOvershoot(t *testing.T) {
+	h := newHarness(t)
+	tip := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(tip, "one")); err != nil {
+		t.Fatal(err)
+	}
+	st := loadState(t, h.store)
+	oid := strings.Repeat("e", 40)
+	rec := state.HistoryRecord{Round: 1, Commit: oid, Base: oid, Review: strings.Repeat("r", 20<<10)}
+	for _, k := range []string{"w-a", "w-b"} {
+		st.Put(k, state.Workflow{ThreadID: "thr_" + k, LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 2, LastReview: "s", History: []state.HistoryRecord{rec}})
+	}
+	if err := h.store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	fillStateTo(t, h.store)
+
+	// Grow the filler by plain bytes, which encode one to one, so the
+	// overshoot is exactly growth minus the spare: 300 bytes under the
+	// record's estimate.
+	st = loadState(t, h.store)
+	over := historyRecordBytes(rec) - 300
+	filler, _ := st.Get("filler")
+	filler.LastReview += strings.Repeat("x", over+stateSpare)
+	st.Put("filler", filler)
+	if err := h.svc.saveEvictingHistory(context.Background(), st, "filler", "t"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	after := loadState(t, h.store)
+	a, _ := after.Get("w-a")
+	b, _ := after.Get("w-b")
+	if kept := len(a.History) + len(b.History); kept != 1 {
+		t.Errorf("records kept = %d, want exactly one evicted and one kept", kept)
+	}
+	if len(a.History) != 0 {
+		t.Errorf("tie broken wrongly: w-a should be evicted before w-b, got a=%d b=%d", len(a.History), len(b.History))
+	}
+}

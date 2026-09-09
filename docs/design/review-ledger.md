@@ -150,12 +150,23 @@ workflows" is not available; within a workflow the oldest is the first
 record, and the retention invariant (a contiguous run ending just before
 the current round) is preserved by dropping from the front. `Save` reports
 the sizes through `state.TooLargeError` so the service can estimate how
-many records to drop before measuring again. Tests cover a file where one
-record from the current workflow suffices, one where another workflow's
-largest history yields its oldest record, one where two workflows each
-lose their oldest and keep their newest, the same scenario with an
-estimate forced high so each pass evicts one record and the save must be
-retried several times, and a state with no history, which fails as before.
+many records to drop before measuring again. The estimate is an upper
+bound on what evicting a record frees, the review as JSON with escaping
+counted plus a generous allowance for the fixed fields, indentation, and
+the history field itself, so a record is never evicted when the file would
+already fit; an overstated estimate costs at most one more pass. The
+candidates sit in a heap built once per save, so evicting E records across
+W workflows costs O(W + E log W) rather than a rescan per record, and the
+loop checks the request context between records because it runs under the
+state lock. Tests cover a file where one record from the current workflow
+suffices, one where another workflow's largest history yields its oldest
+record, one where two workflows each lose their oldest and keep their
+newest, the same scenario with an estimate forced high so each pass evicts
+one record and the save must be retried several times, an overshoot just
+under one record's estimate where exactly one record goes, the estimate
+proven an upper bound against real encodings including escape-heavy text
+and a history's last record, a cancelled context leaving the file as it
+was, and a state with no history, which fails as before.
 
 ## State file version 2
 

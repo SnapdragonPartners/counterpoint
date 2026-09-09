@@ -5,7 +5,9 @@
 package review
 
 import (
+	"container/heap"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -556,23 +558,29 @@ func (s *Service) saveCompleted(ctx context.Context, key, requestID string, befo
 		done.History = state.RetainHistory(fresh.History, previous, done.LastReview)
 	}
 	st.Put(key, done)
-	return s.saveEvictingHistory(st, key, requestID)
+	return s.saveEvictingHistory(ctx, st, key, requestID)
 }
 
 // saveEvictingHistory saves the state, giving up review history under size
 // pressure so that history, this workflow's or any other's, never leaves a
 // completed review unsaved. While Save reports ErrTooLarge, it evicts one
 // record at a time, the oldest record of whichever workflow's history
-// holds the most bytes, until enough is freed to retry, and retries until
-// the save fits or no history remains (issue #24). Taking from the largest
-// history first frees the most per record and keeps every workflow's
-// newest verdicts rather than clearing whole histories. Replay fields are
-// never touched, so no workflow loses its completed-review record: history
-// is derived convenience data, which is why evicting another workflow's
-// copy stays within the rule that recovery never deletes another
-// workflow's active state. The caller holds the state lock and this
-// workflow's lock.
-func (s *Service) saveEvictingHistory(st *state.State, key, requestID string) error {
+// holds the most bytes, until the estimated bytes freed cover the overshoot
+// Save reported, then saves again and repeats until the save fits or no
+// history remains (issue #24). Taking from the largest history first frees
+// the most per record and keeps every workflow's newest verdicts rather
+// than clearing whole histories. The estimate is an upper bound on what a
+// record's removal frees, so a record is never evicted when the file would
+// already fit; an overstated estimate costs at most another pass. Candidates
+// are kept in a heap built once, so E evictions over W workflows cost
+// O(W + E log W) rather than a rescan per record, and the loop honors ctx
+// because it runs under the state lock. Replay fields are never touched,
+// so no workflow loses its completed-review record: history is derived
+// convenience data, which is why evicting another workflow's copy stays
+// within the rule that recovery never deletes another workflow's active
+// state. The caller holds the state lock and this workflow's lock.
+func (s *Service) saveEvictingHistory(ctx context.Context, st *state.State, key, requestID string) error {
+	var plan *evictionPlan
 	for {
 		err := s.store.Save(st)
 		if !errors.Is(err, state.ErrTooLarge) {
@@ -583,59 +591,117 @@ func (s *Service) saveEvictingHistory(st *state.State, key, requestID string) er
 		if errors.As(err, &tooLarge) {
 			over = tooLarge.Size - tooLarge.Limit
 		}
-		// Evict until the estimated bytes freed cover the overshoot, then
-		// let Save measure again. Always at least one record per retry.
+		if plan == nil {
+			plan = newEvictionPlan(st, s.recordBytes)
+		}
 		freed := 0
-		for evicted := false; !evicted || freed <= over; {
-			k, wf, ok := largestHistory(st)
+		for evicted := false; !evicted || freed < over; {
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("evicting review history: %w", cerr)
+			}
+			k, ok := plan.largest()
 			if !ok {
 				if evicted {
 					break
 				}
 				return err
 			}
+			wf, _ := st.Get(k)
 			oldest := wf.History[0]
-			freed += s.recordBytes(oldest)
+			n := s.recordBytes(oldest)
+			freed += n
 			wf.History = wf.History[1:]
 			if len(wf.History) == 0 {
 				wf.History = nil
 			}
 			st.Put(k, wf)
+			plan.shrink(n)
 			evicted = true
 			s.log.Warn("state file is full; review history evicted", "request", requestID, "workflow", k, "round", oldest.Round, "current_workflow", k == key)
 		}
 	}
 }
 
-// largestHistory returns the workflow whose history quotes the most bytes,
-// ties broken by key so eviction is deterministic, or false when no
-// workflow has history.
-func largestHistory(st *state.State) (string, state.Workflow, bool) {
-	var bestKey string
-	var best state.Workflow
-	bestBytes, found := -1, false
+// recordFramingBytes bounds the bytes a history record's fixed fields and
+// JSON framing occupy in the indented state file: the round, two object
+// ids, the field names, indentation at the record's depth, separators,
+// and the history field itself when the last record goes. It is generous
+// on purpose; see historyRecordBytes.
+const recordFramingBytes = 512
+
+// historyRecordBytes is an upper bound on the bytes removed from the
+// encoded state file by evicting r: the review as JSON (escaping counted)
+// plus recordFramingBytes. Over-estimating costs another Save pass;
+// under-estimating would evict a record the file could have kept, so the
+// bound is checked by a test against real encodings.
+func historyRecordBytes(r state.HistoryRecord) int {
+	b, err := json.Marshal(r.Review)
+	if err != nil {
+		return len(r.Review)*6 + recordFramingBytes // cannot happen for a string; be generous
+	}
+	return len(b) + recordFramingBytes
+}
+
+// evictionPlan orders workflows by the bytes their history quotes, largest
+// first, ties by key so eviction is deterministic.
+type evictionPlan struct {
+	items []evictionCandidate
+}
+
+type evictionCandidate struct {
+	key   string
+	bytes int
+}
+
+func newEvictionPlan(st *state.State, recordBytes func(state.HistoryRecord) int) *evictionPlan {
+	p := &evictionPlan{}
 	for k, wf := range st.Workflows {
 		if len(wf.History) == 0 {
 			continue
 		}
 		n := 0
 		for _, r := range wf.History {
-			n += historyRecordBytes(r)
+			n += recordBytes(r)
 		}
-		if n > bestBytes || (n == bestBytes && k < bestKey) {
-			bestKey, best, bestBytes, found = k, wf, n, true
-		}
+		p.items = append(p.items, evictionCandidate{key: k, bytes: n})
 	}
-	return bestKey, best, found
+	heap.Init(p)
+	return p
 }
 
-// historyRecordBytes estimates a record's encoded size: its review text
-// plus the fixed fields (two object ids, a round, and JSON framing). The
-// estimate only decides how many records to evict before Save measures
-// the file again, so it need not be exact.
-func historyRecordBytes(r state.HistoryRecord) int {
-	const fixed = 160
-	return len(r.Review) + fixed
+// largest returns the key with the most history bytes, or false when no
+// history remains.
+func (p *evictionPlan) largest() (string, bool) {
+	if len(p.items) == 0 {
+		return "", false
+	}
+	return p.items[0].key, true
+}
+
+// shrink records that n bytes left the largest candidate's history, and
+// drops it from the plan when nothing remains.
+func (p *evictionPlan) shrink(n int) {
+	p.items[0].bytes -= n
+	if p.items[0].bytes <= 0 {
+		heap.Pop(p)
+		return
+	}
+	heap.Fix(p, 0)
+}
+
+func (p *evictionPlan) Len() int { return len(p.items) }
+func (p *evictionPlan) Less(i, j int) bool {
+	if p.items[i].bytes != p.items[j].bytes {
+		return p.items[i].bytes > p.items[j].bytes
+	}
+	return p.items[i].key < p.items[j].key
+}
+func (p *evictionPlan) Swap(i, j int) { p.items[i], p.items[j] = p.items[j], p.items[i] }
+func (p *evictionPlan) Push(x any)    { p.items = append(p.items, x.(evictionCandidate)) } //nolint:forcetypeassert // heap.Interface contract
+func (p *evictionPlan) Pop() any {
+	last := p.items[len(p.items)-1]
+	p.items = p.items[:len(p.items)-1]
+	return last
 }
 
 // incompleteWorkflowField names the first missing invariant of a stored
