@@ -57,6 +57,20 @@ const (
 	MaxStateFileSize = 16 << 20
 )
 
+// TooLargeError reports an encoded state that exceeds the file limit, with
+// the sizes, so a caller can tell how much must go. It unwraps to
+// ErrTooLarge.
+type TooLargeError struct {
+	Size, Limit int
+	Path        string
+}
+
+func (e *TooLargeError) Error() string {
+	return fmt.Sprintf("%s: encoded state is %d bytes, limit %d: %s", ErrTooLarge, e.Size, e.Limit, e.Path)
+}
+
+func (e *TooLargeError) Unwrap() error { return ErrTooLarge }
+
 // Sentinel errors. Wrapped errors name the file; match with errors.Is.
 var (
 	ErrMalformed          = errors.New("state file is malformed")
@@ -225,7 +239,7 @@ func (st *Store) Save(s *State) error {
 	// Enforce the same bound Load applies, so a save can never produce a
 	// file that the next Load would reject. The previous state stays intact.
 	if int64(len(data)) > MaxStateFileSize {
-		return fmt.Errorf("%w: encoded state is %d bytes, limit %d: %s", ErrTooLarge, len(data), MaxStateFileSize, st.path)
+		return &TooLargeError{Size: len(data), Limit: MaxStateFileSize, Path: st.path}
 	}
 
 	dir := filepath.Dir(st.path)

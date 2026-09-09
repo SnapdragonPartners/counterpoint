@@ -283,10 +283,14 @@ dropping the ledger. A ledger that breaks these invariants, including a
 any of it reaches a prompt.
 
 Under size pressure the ledger yields before a completed review is lost:
-when the state file would exceed its limit, Counterpoint clears the
-workflow's own history and retries, then every workflow's history and
-retries once more, never touching the replay fields. A save that still
-fails reports the review as completed but unsaved, as before.
+when the state file would exceed its limit, Counterpoint evicts history
+one record at a time, the oldest record of whichever workflow's history
+holds the most bytes, until the save fits, never touching the replay
+fields, so every workflow keeps its newest verdicts for as long as
+possible
+([issue 24](https://github.com/SnapdragonPartners/counterpoint/issues/24)).
+A save that still fails once no history remains reports the review as
+completed but unsaved, as before.
 
 The default location is determined with `os.UserConfigDir` and a Counterpoint
 subdirectory. A single environment-variable override may be provided for tests
@@ -690,7 +694,8 @@ Unit tests cover:
   placeholders for oversized verdicts, rejection of every malformed ledger
   shape, verbatim delimited quoting in later prompts with forged delimiters
   defeated, retention across rewritten history, and history eviction under
-  state-file size pressure in both stages with a no-history control;
+  state-file size pressure one record at a time from the largest history,
+  keeping each workflow's newest records, with a no-history control;
 - JSON-RPC response, notification, and server-request dispatch;
 - interleaved app-server events;
 - oversized JSONL messages;

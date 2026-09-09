@@ -408,8 +408,22 @@ func TestOversizedVerdictIsRetainedAsPlaceholder(t *testing.T) {
 
 // fillStateTo adds a filler workflow so the saved state file is exactly
 // spare bytes under the size limit. The filler is a complete record.
-func fillStateTo(t *testing.T, store *state.Store, spare int) {
+func rounds(h []state.HistoryRecord) []int {
+	out := make([]int, 0, len(h))
+	for _, r := range h {
+		out = append(out, r.Round)
+	}
+	return out
+}
+
+// stateSpare is how many bytes fillStateTo leaves under the state file
+// limit: less than one large history record, so a save that adds one must
+// evict.
+const stateSpare = 64
+
+func fillStateTo(t *testing.T, store *state.Store) {
 	t.Helper()
+	spare := stateSpare
 	oid := strings.Repeat("f", 40)
 	st, err := store.Load()
 	if err != nil {
@@ -476,16 +490,17 @@ func TestFullStateFileEvictsHistoryBeforeFailing(t *testing.T) {
 		if err := h.store.Save(st); err != nil {
 			t.Fatal(err)
 		}
-		fillStateTo(t, h.store, 64)
+		fillStateTo(t, h.store)
 
 		h.reviewer.reviewText = "round three verdict"
 		res, err := h.svc.Review(context.Background(), h.request(tip, "three"))
 		if err != nil {
 			t.Fatalf("review should succeed by evicting history: %v", err)
 		}
+		// Only the oldest record goes: round one is evicted, round two kept.
 		after := h.workflow(t)
-		if after.Round != 3 || after.LastReview != res.Review || len(after.History) != 0 {
-			t.Errorf("stored workflow = %+v", after)
+		if after.Round != 3 || after.LastReview != res.Review || len(after.History) != 1 || after.History[0].Round != 2 || after.History[0].Review != big {
+			t.Errorf("stored workflow = %+v, want round 2 retained and round 1 evicted", after)
 		}
 		if filler, ok := load(t, h).Get("filler"); !ok || filler.Round != 1 || len(filler.LastReview) < 1<<10 {
 			t.Errorf("filler workflow damaged: round %d review %d bytes", filler.Round, len(filler.LastReview))
@@ -502,7 +517,7 @@ func TestFullStateFileEvictsHistoryBeforeFailing(t *testing.T) {
 		if err := h.store.Save(st); err != nil {
 			t.Fatal(err)
 		}
-		fillStateTo(t, h.store, 64)
+		fillStateTo(t, h.store)
 
 		// Larger than the spare even after this workflow's own history goes.
 		h.reviewer.reviewText = strings.Repeat("t", 4<<10)
@@ -510,18 +525,79 @@ func TestFullStateFileEvictsHistoryBeforeFailing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("review should succeed by evicting the other workflow's history: %v", err)
 		}
+		// The other workflow's history is the largest, so its oldest record
+		// goes first and its newest is kept; this workflow's small history
+		// is untouched.
 		after := load(t, h)
-		if got, _ := after.Get("other"); got.Round != 3 || got.LastReview != "small" || len(got.History) != 0 || got.ThreadID != "thr_other" {
-			t.Errorf("other workflow = %+v, want its replay record intact and history cleared", got)
+		if got, _ := after.Get("other"); got.Round != 3 || got.LastReview != "small" || len(got.History) != 1 || got.History[0].Round != 2 || got.ThreadID != "thr_other" {
+			t.Errorf("other workflow = %+v, want its replay record intact, round 1 evicted, round 2 kept", got)
 		}
-		if mine := h.workflow(t); mine.Round != 2 || mine.LastReview != res.Review || len(mine.History) != 0 {
-			t.Errorf("stored workflow = %+v", mine)
+		if mine := h.workflow(t); mine.Round != 2 || mine.LastReview != res.Review || len(mine.History) != 1 || mine.History[0].Round != 1 {
+			t.Errorf("stored workflow = %+v, want its own single small record kept", mine)
+		}
+	})
+
+	t.Run("largest history first, newest records kept everywhere", func(t *testing.T) {
+		h, tip, _ := seed(t)
+		st := load(t, h)
+		oid := strings.Repeat("a", 40)
+		mid := strings.Repeat("m", 12<<10)
+		for _, k := range []string{"w-a", "w-b"} {
+			st.Put(k, state.Workflow{ThreadID: "thr_" + k, LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 3, LastReview: "s",
+				History: []state.HistoryRecord{{Round: 1, Commit: oid, Base: oid, Review: big}, {Round: 2, Commit: oid, Base: oid, Review: mid}}})
+		}
+		if err := h.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		fillStateTo(t, h.store)
+
+		// Needs roughly 40 KiB: both workflows lose their oldest (20 KiB
+		// each) before either loses its newest (12 KiB).
+		h.reviewer.reviewText = strings.Repeat("v", 36<<10)
+		if _, err := h.svc.Review(context.Background(), h.request(tip, "two")); err != nil {
+			t.Fatalf("review should succeed by evicting oldest records across workflows: %v", err)
+		}
+		after := load(t, h)
+		for _, k := range []string{"w-a", "w-b"} {
+			got, _ := after.Get(k)
+			if len(got.History) != 1 || got.History[0].Round != 2 || got.History[0].Review != mid || got.LastReview != "s" {
+				t.Errorf("%s = rounds %v, want only round 2 (the newest) retained", k, rounds(got.History))
+			}
+		}
+	})
+
+	t.Run("retries the save when one pass frees too little", func(t *testing.T) {
+		h, tip, _ := seed(t)
+		// An estimate that always exceeds the overshoot makes each pass
+		// evict exactly one record, so the scenario below needs several
+		// Save retries rather than one.
+		h.svc.recordBytes = func(state.HistoryRecord) int { return 1 << 30 }
+		st := load(t, h)
+		oid := strings.Repeat("a", 40)
+		mid := strings.Repeat("m", 12<<10)
+		for _, k := range []string{"w-a", "w-b"} {
+			st.Put(k, state.Workflow{ThreadID: "thr_" + k, LastCommit: oid, LastBase: oid, LastRequestHash: "h", Round: 3, LastReview: "s",
+				History: []state.HistoryRecord{{Round: 1, Commit: oid, Base: oid, Review: big}, {Round: 2, Commit: oid, Base: oid, Review: mid}}})
+		}
+		if err := h.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		fillStateTo(t, h.store)
+		h.reviewer.reviewText = strings.Repeat("v", 36<<10)
+		if _, err := h.svc.Review(context.Background(), h.request(tip, "two")); err != nil {
+			t.Fatalf("review should succeed after several eviction passes: %v", err)
+		}
+		after := load(t, h)
+		for _, k := range []string{"w-a", "w-b"} {
+			if got, _ := after.Get(k); len(got.History) != 1 || got.History[0].Round != 2 {
+				t.Errorf("%s = rounds %v, want only round 2 retained", k, rounds(got.History))
+			}
 		}
 	})
 
 	t.Run("no history to evict", func(t *testing.T) {
 		h, tip, _ := seed(t)
-		fillStateTo(t, h.store, 64)
+		fillStateTo(t, h.store)
 		before := h.workflow(t)
 
 		h.reviewer.reviewText = strings.Repeat("n", 4<<10)
