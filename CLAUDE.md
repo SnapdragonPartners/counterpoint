@@ -181,7 +181,16 @@ the author's claims are correct.
 - ADRs and design records in `docs/design/` carry a status line naming who
   accepted them and when. A record binds later review rounds only once
   that line records both Codex and DR, in a commit an earlier round
-  approved; until then it is a proposal under review.
+  approved; until then it is a proposal under review. The status line is
+  the author's record of DR's acceptance, and within a branch there is
+  nothing more independent: every commit on Claude's branches carries
+  DR's author identity and is made with DR's keys, so no signature or
+  authorship check can tell DR's hand from Claude's, and the reviewer's
+  sandbox cannot see issues or pull requests. The merge is the
+  independent record of DR's acceptance and covers everything on main.
+  DR settled this on 2026-09-08 after Codex asked for a stronger artifact;
+  none exists under ADR 0001's model, in which the reviewer does not
+  distinguish the user from the agent.
 
 ## Development and verification
 
