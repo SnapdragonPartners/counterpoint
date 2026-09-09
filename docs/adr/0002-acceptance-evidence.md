@@ -7,8 +7,8 @@ summary = "Within a branch, the strongest evidence that DR accepted an ADR or de
 
 # 0002. Evidence of Acceptance Within a Branch
 
-Status: Proposed (DR decided 2026-09-08; awaiting Codex approval in the
-review of the branch that introduces this file)
+Status: Accepted (Codex round 5 of `docs/record-resolutions` and DR,
+2026-09-08)
 
 ## Context
 
