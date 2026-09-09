@@ -69,9 +69,10 @@ amendment to the governing design record or specification. The branch
 notes of the round that reviews the record cite it by path. When the
 resolution arrives in the round that would otherwise approve the branch,
 recording it costs one more documentation-only round, and that round is
-required. A resolution that exists only in conversation or in branch notes
-is not a resolution: the reviewer starts each round with only the last
-three verdicts, and the next author starts with none.
+required. A finding settled by a change is recorded by the change. A
+resolution that exists only in conversation, in the review thread, or in
+branch notes is not a resolution: the reviewer starts each round with only
+the last three verdicts, and the next author starts with none.
 
 ### Submitting for review
 
