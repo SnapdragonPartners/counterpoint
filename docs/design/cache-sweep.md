@@ -2,6 +2,9 @@
 
 Design record for
 [issue 15](https://github.com/SnapdragonPartners/counterpoint/issues/15).
+
+Status: Accepted (Codex round 12 of `feat/cache-sweep` and DR, 2026-09-08)
+
 Settled between DR, Claude, and Codex on 2026-09-08 over twelve review
 rounds before the code was written; the implementation on the same branch
 follows this document. Once it

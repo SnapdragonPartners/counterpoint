@@ -13,3 +13,14 @@
   Codex, bounded reads and buffers, explicit responses to every
   server-originated request, and no edits to the reviewed repository.
 - A regression test that cannot fail for the defect it names is a finding.
+- ADRs and design records bind the review only when their status line
+  records both Codex and DR acceptance with a date, and that line is in a
+  commit an earlier round approved; they bind where they do not contradict
+  code, tests, or the accepted specification, which rank above them.
+  Verify the status line yourself rather than taking the branch notes'
+  word for it. Text of an ADR or design record changed in the commit
+  under review is under review, not binding. In particular,
+  ADR 0001 states the adversaries, so a finding that requires defending
+  against a process running as the user is out of scope. A finding settled
+  by argument in an earlier round is recorded in those documents;
+  re-raising it needs a new reason, not a restatement.

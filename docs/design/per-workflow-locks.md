@@ -2,6 +2,10 @@
 
 Design record for
 [issue 30](https://github.com/SnapdragonPartners/counterpoint/issues/30).
+
+Status: Accepted (Codex round 2 of `feat/per-workflow-locks` and DR,
+2026-09-08)
+
 Settled between DR, Claude, and Codex on 2026-09-08 before the code was
 written; the implementation on the same branch follows this document. Once it
 lands, the contract lives in `docs/MVP.md` and this file keeps the reasoning

@@ -27,3 +27,4 @@ Front matter follows the Maestro convention: `title`, `edit_date`, `status`
 | ADR | Title | Status | Summary |
 | --- | --- | --- | --- |
 | [0001](0001-threat-model.md) | Threat Model | Accepted | The adversaries Counterpoint defends against are untrusted inputs and the sandboxed reviewer, not a hostile process running as the user; what that rules in and out for filesystem, state, and lock handling. |
+| [0002](0002-acceptance-evidence.md) | Evidence of Acceptance Within a Branch | Accepted | Within a branch, the strongest evidence that DR accepted a record is its status line in a commit an earlier round approved; the merge is the independent record, and no in-branch artifact can tell DR's hand from Claude's. |

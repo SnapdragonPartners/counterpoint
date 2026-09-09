@@ -77,6 +77,20 @@ notes rather than a change. If Codex reaffirms it, stop, state both positions,
 and bring the decision to DR before another round. Do not implement a change
 Claude believes is wrong in order to end the loop.
 
+A finding settled by argument rather than by a change, whether Codex
+withdraws it after Claude's reasoned response, Claude accepts it after a
+further round, or DR decides it after escalation, is recorded in the
+repository before the push gate, in a commit Codex has reviewed: as an ADR
+in `docs/adr/` when the resolution would apply beyond the current work,
+otherwise as a dated amendment to the governing design record or
+specification. The branch notes of the round that reviews the record cite
+it by path. When the resolution arrives in the round that would otherwise
+approve the branch, recording it costs one more documentation-only round,
+and that round is required. A finding settled by a change is recorded by
+the change. A resolution that exists only in conversation, in the review
+thread, or in branch notes is not a resolution: the reviewer's memory is
+three rounds and the next author's is none.
+
 ### Submitting for review
 
 Counterpoint is registered as an MCP server in Claude Code, so the review
@@ -164,6 +178,12 @@ the author's claims are correct.
   decision that cuts across issues, such as the threat model or
   documentation authority, as an ADR in `docs/adr/` (see its `README.md`
   for the lifecycle), and cite it rather than re-deriving it.
+- ADRs and design records in `docs/design/` carry a status line naming who
+  accepted them and when. A record binds later review rounds only once
+  that line records both Codex and DR, in a commit an earlier round
+  approved; until then it is a proposal under review. The status line is
+  the strongest in-branch evidence of DR's acceptance that can exist, and
+  the merge is the independent one: see ADR 0002 (`docs/adr/`).
 
 ## Development and verification
 
