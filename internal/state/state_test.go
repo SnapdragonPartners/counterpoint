@@ -365,6 +365,26 @@ func TestSameReplayFieldsIgnoresHistoryOnly(t *testing.T) {
 	}
 }
 
+func TestSaveReportsTheSizesWhenTooLarge(t *testing.T) {
+	st := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	s, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Put("w", Workflow{ThreadID: "t", LastCommit: "c", LastBase: "b", LastRequestHash: "h", Round: 1, LastReview: strings.Repeat("x", MaxStateFileSize)})
+	err = st.Save(s)
+	var tooLarge *TooLargeError
+	if !errors.Is(err, ErrTooLarge) || !errors.As(err, &tooLarge) {
+		t.Fatalf("Save error = %v, want ErrTooLarge carrying a TooLargeError", err)
+	}
+	if tooLarge.Limit != MaxStateFileSize || tooLarge.Size <= tooLarge.Limit || tooLarge.Path != st.Path() {
+		t.Errorf("TooLargeError = %+v", tooLarge)
+	}
+	if !strings.Contains(err.Error(), "exceeds the size limit") || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("error text = %q", err.Error())
+	}
+}
+
 func TestLockPathIsBesideStateFile(t *testing.T) {
 	st := NewStore("/x/y/state.json")
 	if got := st.LockPath(); got != "/x/y/state.json.lock" {
