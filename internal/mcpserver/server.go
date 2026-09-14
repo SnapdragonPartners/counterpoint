@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -23,6 +24,28 @@ const (
 	// ToolName is the single tool Counterpoint exposes.
 	ToolName = "review"
 
+	// HeartbeatInterval is how often a running review call sends a
+	// progress notification and measures its silence toward the client
+	// (docs/design/sleep-survival.md).
+	HeartbeatInterval = 30 * time.Second
+
+	// ClientIdleTimeout is Claude Code's default idle timeout for a stdio
+	// tool call: it aborts a call that has produced no response and no
+	// progress notification for this long, counting wall-clock time, and
+	// the abort does not cancel the call on this side.
+	ClientIdleTimeout = 30 * time.Minute
+
+	// MaxSilence is the silence toward the client at which a call is ended
+	// rather than run on for a client that has probably given up. Silence
+	// is wall-clock time since the last heartbeat sent, or since the
+	// request when none was; a machine sleep counts in full. Every client
+	// check before a tick sees at most the silence that tick measures, so
+	// the interval of margin under the client's timeout keeps Counterpoint
+	// failing first. With heartbeats this survives a sleep shorter than
+	// MaxSilence less one interval; without a progress token it bounds the
+	// whole call to MaxSilence of wall-clock time.
+	MaxSilence = ClientIdleTimeout - HeartbeatInterval
+
 	// MaxRequestBytes bounds one JSONL line read from the MCP client. A
 	// decoded byte of branch notes can occupy up to six bytes on the wire
 	// as a JSON escape, so the largest allowed notes fit with room for
@@ -30,10 +53,13 @@ const (
 	MaxRequestBytes = 6*review.MaxBranchNotesBytes + 64<<10
 )
 
-// Sentinel errors for MCP input framing.
+// Sentinel errors.
 var (
 	ErrRequestTooLarge = errors.New("mcp request exceeds the size limit")
 	ErrRequestFraming  = errors.New("mcp request is not one complete JSON value per line")
+	// ErrSilence ends a call whose silence toward the client reached
+	// MaxSilence; it is the cause of the review's context.
+	ErrSilence = errors.New("review call was silent toward the client for too long")
 )
 
 // Input is the review tool's arguments. Field descriptions become the input
@@ -63,27 +89,44 @@ type Output struct {
 // the Codex turn is interrupted and the child reaped before the server
 // stops, which the SDK's own shutdown does not do for in-flight handlers.
 func New(lifecycle context.Context, svc *review.Service, version string, log *slog.Logger) *mcp.Server {
+	return newServer(lifecycle, svc, version, log, HeartbeatInterval, wallNow)
+}
+
+// wallNow is the wall clock with the monotonic reading stripped, so that
+// subtracting two readings measures wall time, sleep included.
+func wallNow() time.Time { return time.Now().Round(0) }
+
+// newServer is New with the heartbeat interval and the wall clock as
+// parameters for tests.
+func newServer(lifecycle context.Context, svc *review.Service, version string, log *slog.Logger, heartbeat time.Duration, now func() time.Time) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "counterpoint", Version: version}, &mcp.ServerOptions{Logger: log})
 	mcp.AddTool(server, &mcp.Tool{
 		Name: ToolName,
 		Description: "Ask the persistent Codex reviewer for this repository and branch to review a local commit. " +
-			"Blocks until the review completes: up to sixty seconds of setup plus a twenty-minute review turn. " +
+			"Blocks until the review completes: up to sixty seconds of setup plus a twenty-minute review turn, " +
+			"sending a progress notification every thirty seconds meanwhile so the client's idle timeout does not fire. " +
 			"Counterpoint never pushes, opens pull requests, merges, or edits the repository.",
-	}, func(reqCtx context.Context, _ *mcp.CallToolRequest, in Input) (*mcp.CallToolResult, Output, error) {
-		ctx, cancel := context.WithCancel(reqCtx)
-		defer cancel()
-		stop := context.AfterFunc(lifecycle, cancel)
+	}, func(reqCtx context.Context, req *mcp.CallToolRequest, in Input) (*mcp.CallToolResult, Output, error) {
+		ctx, cancel := context.WithCancelCause(reqCtx)
+		defer cancel(nil)
+		stop := context.AfterFunc(lifecycle, func() { cancel(nil) })
 		defer stop()
 
 		id := newRequestID()
 		ctx = review.WithRequestID(ctx, id)
 		log.Info("review request received", "request", id, "branch", in.Branch, "commit", in.Commit, "notes_bytes", len(in.BranchNotes), "build", in.Build)
+		stopWatch := watchCall(reqCtx, req, id, cancel, heartbeat, now, log)
+		defer stopWatch()
 
 		res, err := svc.Review(ctx, review.Request{
 			Repo: in.Repo, Branch: in.Branch, Commit: in.Commit, BranchNotes: in.BranchNotes, Build: in.Build,
 		})
 		if err != nil {
-			// Returned errors become tool errors, not protocol errors.
+			// Returned errors become tool errors, not protocol errors. A
+			// call the watcher ended says so first.
+			if cause := context.Cause(ctx); errors.Is(cause, ErrSilence) {
+				err = fmt.Errorf("%w: %w", cause, err)
+			}
 			return nil, Output{}, fmt.Errorf("request %s: %w", id, err)
 		}
 		warnings := res.Warnings
@@ -96,6 +139,74 @@ func New(lifecycle context.Context, svc *review.Service, version string, log *sl
 		}, nil
 	})
 	return server
+}
+
+// watchCall runs one goroutine for the call until the returned stop
+// function is called, which is after the review has returned, so every
+// phase is covered: the lock wait, Git validation, the disposable
+// checkout, setup, the turn, and cleanup (docs/design/sleep-survival.md).
+// Every interval it measures the call's silence toward the client, the
+// wall-clock time since the last heartbeat it sent or since the request
+// when none was, and ends the call through end with ErrSilence once that
+// reaches MaxSilence: the client has probably given up, and a review must
+// not run on unobserved. Then, when the request carries a progress token,
+// it sends notifications/progress with a count of heartbeats as the
+// progress value, which increases as the protocol requires whatever the
+// wall clock does, and the wall-clock age of the call in the message.
+// Without a token nothing can be sent and the log says so once. Sends run
+// on a context detached from the request's cancellation, so a client that
+// cancelled does not also make the last heartbeat fail. A send that fails
+// means the connection is gone; it is logged once and the goroutine stops.
+func watchCall(reqCtx context.Context, req *mcp.CallToolRequest, id string, end context.CancelCauseFunc, interval time.Duration, now func() time.Time, log *slog.Logger) func() {
+	token := req.Params.GetProgressToken()
+	if token == nil {
+		log.Info("progress heartbeat disabled: the request carries no progress token; the call ends after MaxSilence", "request", id, "max_silence", MaxSilence)
+	}
+	ctx, cancel := context.WithCancel(context.WithoutCancel(reqCtx))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		start := now()
+		lastSent := start
+		ended := false
+		for n := 1; ; n++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			t := now()
+			if silence := t.Sub(lastSent); !ended && silence >= MaxSilence {
+				ended = true
+				why := "the machine slept"
+				if token == nil {
+					why = "the request carried no progress token, so no heartbeat could be sent"
+				}
+				log.Warn("review call ended: silent toward the client", "request", id, "silence", silence.Round(time.Second), "reason", why)
+				end(fmt.Errorf("%w: %v without a heartbeat or a result (%s), which a client's default idle timeout of %v does not survive, so the client has probably given up; retry to start a fresh round",
+					ErrSilence, silence.Round(time.Second), why, ClientIdleTimeout))
+			}
+			if token == nil {
+				continue
+			}
+			err := req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				ProgressToken: token,
+				Progress:      float64(n),
+				Message:       fmt.Sprintf("review in progress for %s", t.Sub(start).Round(time.Second)),
+			})
+			if err != nil {
+				log.Warn("progress heartbeat stopped: notification failed", "request", id, "error", err)
+				return
+			}
+			lastSent = now()
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // newRequestID returns a short random correlation id for logs.

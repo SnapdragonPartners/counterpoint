@@ -3,12 +3,14 @@
 Design record for
 [issue 35](https://github.com/SnapdragonPartners/counterpoint/issues/35).
 
-Status: Proposed (round 3 of `fix/survive-sleep`, 2026-09-14)
+Status: Proposed; approved by Codex in round 3 of `fix/survive-sleep`
+(2026-09-14); awaiting DR's acceptance.
 
-To be settled between DR, Claude, and Codex before the code is written; the
-implementation on the same branch follows this document. Once it lands, the
-contract lives in the specification and the README, and this file keeps the
-evidence, the reasoning, and the rejected alternatives.
+Settled between Claude and Codex over three read-only rounds on 2026-09-14
+before the code was written; the implementation on the same branch follows
+this document. Once it lands, the contract lives in the specification and
+the README, and this file keeps the evidence, the reasoning, and the
+rejected alternatives.
 
 Round 1 proposed wall-clock phase budgets beside the heartbeat. Codex's
 findings on that round (recorded under "Rejected alternatives" and "Review
@@ -343,15 +345,17 @@ Codex reviewed round 2 (commit 8cefc10) read-only and reported one:
   the log says why; a client that cancels the call's context (the go-sdk
   client sends `notifications/cancelled`) ends the review's context and
   gets an error result.
-- The guard, with the wall clock injected: a jump of an hour between ticks
-  during a blocked turn ends the call within a few intervals with a tool
-  error carrying `ErrSilence` and the measured silence, the reviewer
-  closed and the workflow lock released; the same jump during the final
-  save, held off by a state lock the test holds, ends the call the same
-  way, which is the unbudgeted-phase case; a jump of twenty minutes ends
-  nothing and the call completes; without a token, a jump past
-  `MaxSilence` ends the call with an error that says no heartbeat could be
-  sent.
+- The guard, with the wall clock injected: during a blocked turn with
+  heartbeats, two twenty-minute jumps with heartbeats between them are
+  both survived, and a jump of an hour then ends the call within a few
+  intervals with a tool error carrying `ErrSilence`, the measured silence,
+  and the interrupted turn, the reviewer closed; the same two twenty-minute
+  jumps without a token end the call, though neither alone does, with an
+  error that says no heartbeat could be sent, since silence accumulates
+  when nothing is sent; an hour's jump during the final save, held off by
+  a state lock the reviewer takes as it finishes, ends the call the same
+  way within seconds instead of after the save's thirty-second lock wait,
+  which is the unbudgeted-phase case.
 - With the fake app-server subprocess in its stalled-turn scenario, driven
   through the real server and client: heartbeats arrive while the turn is
   stalled, and the client's cancellation reaches the child as
@@ -360,8 +364,10 @@ Codex reviewed round 2 (commit 8cefc10) read-only and reported one:
   `internal/appserver` are unchanged.
 - Every regression test is checked by a real behavioral mutation before it
   is committed: a heartbeat that never sends, a guard that never fires, a
-  guard that resets its mark without sending, a cancellation that does not
-  reach the review context.
+  guard that resets its mark without sending, a mark that never advances
+  after a send, a progress value that does not increase, a tool error that
+  does not name the silence, a cancellation that does not reach the review
+  context.
 
 ## Documentation
 

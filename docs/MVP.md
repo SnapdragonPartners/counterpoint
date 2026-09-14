@@ -28,6 +28,13 @@ Issues rather than here:
   reviewer never saw its earlier verdicts. Resolved by the review ledger
   described under "State" and "Review request" and designed in
   `docs/design/review-ledger.md`.
+- [Issue 35](https://github.com/SnapdragonPartners/counterpoint/issues/35):
+  a review that spanned a machine sleep outlived the client's idle timeout
+  and ran on for a client that had given up, because the phase budgets
+  count awake time and the client's timer counts wall-clock silence.
+  Resolved by progress heartbeats and a silence bound, described under
+  "Concurrency and cancellation" and designed in
+  `docs/design/sleep-survival.md`.
 
 Items under "Explicitly deferred" stay deferred until an accepted design or
 issue adds them.
@@ -567,22 +574,47 @@ so the save is refused rather than overwriting. Lock order is the workflow
 lock first, then the scratch directory lock, with the state lock a leaf
 that is never held while acquiring another.
 
-Two fixed phase budgets apply. Setup has sixty seconds covering the
-app-server launch, its handshake, and thread start or resume; a stall anywhere
-in setup fails the call, closes the child, and releases the workflow lock.
-The review turn then has twenty minutes. Lock acquisition, Git validation,
-persistence, and cleanup (up to five seconds for the turn to interrupt and
-five for the child to exit before it is killed) are outside both budgets, so
-the budgets are not a bound on the whole call. They sit well below the MCP
-client's default idle timeout so Counterpoint fails first with a clear error.
-Observed reviews rarely exceed five minutes. Configurable timeouts are
-deferred.
+Two fixed phase budgets apply, both of awake time: Go's timers stop while
+the machine sleeps, so a sleep never consumes budget. Setup has sixty
+seconds covering the app-server launch, its handshake, and thread start or
+resume; a stall anywhere in setup fails the call, closes the child, and
+releases the workflow lock. The review turn then has twenty minutes. Lock
+acquisition, Git validation, persistence, and cleanup (up to five seconds
+for the turn to interrupt and five for the child to exit before it is
+killed) are outside both budgets, so the budgets are not a bound on the
+whole call. They sit well below the MCP client's default idle timeout so
+Counterpoint fails first with a clear error. Observed reviews rarely exceed
+five minutes. Configurable timeouts are deferred.
+
+For the life of a call, from the request's arrival to its result,
+Counterpoint sends `notifications/progress` every thirty seconds carrying
+the request's progress token and a count of heartbeats sent, so the
+client's idle timeout does not fire on a review that is slow; a request
+without a token gets no heartbeats and a log line saying so. At the same
+cadence it measures the call's silence toward the client, the wall-clock
+time since the last heartbeat sent or since the request when none was, and
+ends the call once that reaches the client's default idle timeout less one
+interval, twenty-nine minutes and thirty seconds, in whatever phase the
+call is: the turn is interrupted, the child reaped, the lock released, and
+the tool error names the silence and its reason. Every client check before
+Counterpoint's next tick sees at most the silence that tick measures, so
+the client's timer cannot fire first. With heartbeats, silence grows only
+while the machine sleeps: a sleep shorter than twenty-nine minutes is
+survived with the budgets intact, and a longer one ends the call within
+thirty seconds of wake. Without a token the bound applies to the call's
+wall-clock length, sleep or not (`docs/design/sleep-survival.md`).
 
 On timeout, MCP request cancellation, or closure of Counterpoint's own stdin,
 Counterpoint sends `turn/interrupt`, waits briefly for the terminal event, and
 returns an error. On shutdown it terminates the child process. A retry after
 cancellation starts a new turn on the same thread; the interrupted turn remains
-in Codex's history.
+in Codex's history. A client that gives up on a call without sending a
+cancellation, as Claude Code's idle timeout does, does not end the review;
+the silence bound above is what keeps such a review from running on. After
+a sleep long enough to carry the silence past the client's timeout in one
+step, the client may abort on wake before Counterpoint's next tick and
+discard the error it is sent; the lock is still free within about forty
+seconds of wake, and a retry starts a fresh round.
 
 ## Human gate
 
@@ -632,10 +664,12 @@ dumps by default.
 
 Claude Code's per-call MCP tool timeout defaults to many hours, but its idle
 timeout for stdio servers aborts a call that produces no response and no
-progress notification for thirty minutes. Counterpoint's phase budgets total
-twenty-one minutes plus unbudgeted Git and cleanup time, and the MVP does not
-send progress notifications, so the thirty-minute default should be kept as
-margin rather than lowered. MCP input is bounded to one complete JSON value
+progress notification for thirty minutes. Counterpoint sends a progress
+notification every thirty seconds for the life of a call and ends a call
+whose silence toward the client reaches thirty seconds less than that
+default, so keep the default rather than lowering it toward the heartbeat
+interval. The abort does not cancel the call on Counterpoint's side; see
+"Concurrency and cancellation". MCP input is bounded to one complete JSON value
 per line of at most 6 MiB plus 64 KiB on the wire. The README names the
 client settings for users who have lowered them.
 
@@ -705,6 +739,14 @@ Unit tests cover:
   fallback;
 - `failed` and `interrupted` terminal handling;
 - turn timeout and cancellation issuing `turn/interrupt`;
+- progress heartbeats and the silence bound: heartbeats sent at the cadence
+  with the request's token and an increasing count for the life of a call,
+  through cleanup and not after the result; none without a token, with the
+  reason logged, and the tokenless call ended at the bound; a sleep short
+  of the bound survived and a longer one ending a blocked turn on wake with
+  the reviewer closed and the error naming the silence; the bound ending
+  a call from a phase outside the budgets, the final save held off by a
+  state lock; and a client cancellation ending the review;
 - cross-process lock acquisition, including bounded wait and clear failure
   for the workflow lock and the state lock; the state lock free during
   setup
@@ -722,7 +764,9 @@ second review round whose prompt quotes the round-one verdict verbatim
 across the restart, a build-capable round whose checkout the fake observes
 and which is gone afterwards, a round where the fake edits a tracked file, a
 policy mismatch that still removes the checkout, and a return to a
-read-only round on the worktree. The fake echoes the workspace-write policy
+read-only round on the worktree; and, through the MCP server, heartbeats
+during a stalled turn with the client's cancellation reaching the fake as
+`turn/interrupt`. The fake echoes the workspace-write policy
 it parses from the configuration overrides on its own command line. Live
 Codex tests are manual and require explicit human approval because they use
 model capacity and local credentials.
@@ -750,8 +794,6 @@ The MVP is accepted when a clean local demonstration can:
   in-flight state and crash reconciliation. This is the first likely extension;
   the request-identity and completed-only persistence rules above are intended
   to make it straightforward.
-- MCP progress notifications, which would be the remedy if reviews ever need to
-  run longer than the client idle timeout.
 - Background jobs, polling, and cancellation UI.
 - Per-workflow state files. Locks are already per workflow.
 - Multiple simultaneous review conversations on one branch.
