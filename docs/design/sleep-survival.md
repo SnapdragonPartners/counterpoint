@@ -369,6 +369,27 @@ Codex reviewed round 2 (commit 8cefc10) read-only and reported one:
   does not name the silence, a cancellation that does not reach the review
   context.
 
+## Amendments
+
+**2026-09-14, after Codex's round-4 review of the implementation.** A
+review that completes as the guard fires is returned as a success, not
+suppressed. Codex asked the handler to check for `ErrSilence` after the
+review returns regardless of its error, because a review can complete
+concurrently with the watcher reaching `MaxSilence` and the client has
+probably discarded the call by then. The guard exists to stop a review
+from running on for a client that has given up, and every phase of the
+call honors the cancelled context: the turn is interrupted, a Git command
+or a lock wait returns, and the final save takes the state lock only while
+the context is live. A success after the guard therefore means the review
+had already completed and its record had been saved when the guard
+fired; nothing ran on. Returning that result costs nothing when the
+client is gone, since it discards the response either way, and is right
+when the client is still waiting. Replacing it with `ErrSilence` would
+tell the agent a round was lost and to start a fresh one, when the round
+is persisted and the next identical request replays it. The race window is
+the moments between the save and the handler's return, and the outcome
+in it is the better one.
+
 ## Documentation
 
 The README's "Timeouts" section states that the budgets count awake time,
