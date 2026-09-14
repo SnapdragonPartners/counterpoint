@@ -3,7 +3,7 @@
 Design record for
 [issue 35](https://github.com/SnapdragonPartners/counterpoint/issues/35).
 
-Status: Proposed (round 2 of `fix/survive-sleep`, 2026-09-14)
+Status: Proposed (round 3 of `fix/survive-sleep`, 2026-09-14)
 
 To be settled between DR, Claude, and Codex before the code is written; the
 implementation on the same branch follows this document. Once it lands, the
@@ -11,11 +11,14 @@ contract lives in the specification and the README, and this file keeps the
 evidence, the reasoning, and the rejected alternatives.
 
 Round 1 proposed wall-clock phase budgets beside the heartbeat. Codex's
-findings on that round (recorded under "Rejected alternatives" and
-"Round-1 findings") showed that the unbudgeted phases of a call still
-needed a guard of their own, and that once such a guard exists the
-wall-clock budgets only make every sleep consume budget. This round keeps
-the budgets as they are and adds one call-wide guard instead.
+findings on that round (recorded under "Rejected alternatives" and "Review
+findings") showed that the unbudgeted phases of a call still needed a
+guard of their own, and that once such a guard exists the wall-clock
+budgets only make every sleep consume budget. Round 2 kept the budgets and
+added one call-wide guard that measured the machine's sleep; Codex found
+that its guarantee rested on a progress token the client has not been seen
+to send. This round measures the call's silence toward the client instead,
+which needs no token to be safe.
 
 ## Incident
 
@@ -72,7 +75,10 @@ Nothing runs through a Mac's sleep, daemon or not. The design goal is to
 behave correctly across one: a sleep the client survives must not cost the
 review, and a sleep the client may not survive must end the call promptly
 on wake, in whatever phase it lands, with the lock released and a clear
-error, rather than spend a paid turn on a result nobody will receive.
+error, rather than spend a paid turn on a result nobody will receive. The
+quantity the client's timer actually measures is silence: wall-clock time
+since it last received a response or a progress notification for the call.
+The design measures the same quantity from Counterpoint's side.
 
 ### What the client does when it gives up
 
@@ -98,9 +104,10 @@ against the log and the SDK:
 So cancellation reaches the review when the client sends it or closes the
 connection, and the idle-timeout abort does neither: the review runs on to
 its own budget and its result is discarded. That is the behavior to state in
-the specification. The heartbeat below keeps the abort from happening for
-any sleep the client can survive, and the guard ends the call for any sleep
-it may not.
+the specification. The heartbeat below keeps the client's silence short
+while Counterpoint is awake, and the guard ends the call before the
+client's silence can reach its timeout, whether the silence came from a
+sleep or from a request that gave Counterpoint no way to send a heartbeat.
 
 ## Invariants that stay
 
@@ -124,8 +131,8 @@ it may not.
 
 One goroutine per call, started when the MCP handler is entered and stopped
 after the review has returned, wakes every thirty seconds
-(`HeartbeatInterval`) and does two things: it sends a progress heartbeat,
-and it measures how long the machine slept since its previous wake-up. Both
+(`HeartbeatInterval`) and does two things: it measures the call's silence
+toward the client, and it sends a progress heartbeat when it can. Both
 cover every phase of the call, not just the turn: the lock wait, Git
 validation, preparing a disposable checkout (a clone of a large repository
 can take minutes), app-server setup, the turn, the checkout integrity
@@ -143,69 +150,84 @@ check, and the final save.
   elapsed since the call began.
 - A request that carries no progress token gets no heartbeats, because a
   progress notification without a token has nothing to attach to, and one
-  Info log line says so. That line is also the confirmation that Claude
-  Code sends a token on `tools/call`: its abort message names progress
-  notifications as what would have kept the call alive, and the MCP SDK it
-  embeds routes them by token, but the token itself has not been observed
-  on the wire, so the first live call after install is the check. The
-  sleep guard runs whether or not there is a token.
-- Heartbeats are sent on a context detached from the request's
-  cancellation, so they continue through cleanup after a cancellation, a
-  lifecycle shutdown, or the guard firing, and a client still waiting gets
-  the error rather than a silence. A send that fails means the connection
-  is gone; it is logged once at Warn and heartbeats stop rather than
-  logging every thirty seconds.
+  Info log line says so and names the bound the guard applies instead.
+  Whether Claude Code 2.1.270 sends a token on `tools/call` has not been
+  observed on the wire: its abort message names progress notifications as
+  what would have kept the call alive, and the MCP SDK it embeds delivers
+  a progress notification only to the request whose token it carries, so
+  a client that could not see them would have no reason to mention them;
+  but the binary is a compiled bundle and no captured log on this machine
+  holds a raw request. Observing it takes a Claude Code tool call, which
+  is a paid model call, so it is left for DR to authorize after install;
+  the log line is where the answer will appear. The design does not
+  depend on the answer: the guard is safe with or without the token, and
+  the token only decides how much silence a call can afford.
+- Heartbeats continue through cleanup after a lifecycle shutdown or the
+  guard firing, so a client still waiting gets the error rather than a
+  silence. A send that fails means the connection is gone; it is logged
+  once at Warn and heartbeats stop rather than logging every thirty
+  seconds.
 - The go-sdk exposes the token as `req.Params.GetProgressToken()` and the
   send as `req.Session.NotifyProgress`, both on the `CallToolRequest` the
   handler already receives, so the whole mechanism lives in
   `internal/mcpserver` and the review package does not learn about MCP.
 
-### The sleep guard
+### The silence guard
 
-- Each tick reads the wall clock (with the monotonic reading stripped, so
-  the subtraction compares wall time) and subtracts the previous tick's
-  reading and the interval; what remains is the time the machine spent
-  asleep between the two ticks, since the ticker itself runs on awake time.
-  Ordinary scheduling delay adds milliseconds, which is nothing at the
-  threshold below.
-- When that sleep is at least `MaxSleep`, the guard ends the call: it
-  cancels the review's context with a cause, `ErrSlept`, whose text names
-  the sleep it measured and tells the agent that the client has probably
-  given up and a retry starts a fresh round. Whatever phase the call is in
-  ends the way a cancellation does: a turn is interrupted and the child
-  reaped; a Git command, a checkout preparation, or a lock wait returns on
-  its context; the workflow lock is released after the child has exited.
-  The handler wraps the review's error with the cause so the tool error
-  says why the call ended.
-- `MaxSleep` is the client's default idle timeout less one heartbeat
-  interval: 29 minutes 30 seconds. The client's idle timer counts
-  wall-clock silence and its check runs on its own cadence; the first
-  heartbeat after wake goes out within one interval; so after a sleep
-  shorter than `MaxSleep` the client's timer cannot have reached its
-  timeout at any check, whichever fires first. After a longer sleep it
-  may have, and a review running on for a client that has aborted is the
-  incident. The constant is named for what it is, the longest sleep a call
-  survives, with the client's default idle timeout beside it as the
-  constant it derives from; a client configured with a longer idle timeout
-  gets the same rule, since Counterpoint cannot see the setting.
-- Detection is within one interval of wake, because the ticker's next tick
-  is at most an interval of awake time away.
+- The call's silence is the wall-clock time since Counterpoint last sent
+  the client something for it: the last heartbeat that was sent, or the
+  request's arrival while none has been. Each tick reads the wall clock
+  with the monotonic reading stripped, so the subtraction compares wall
+  time and a sleep counts in full, and subtracts that mark.
+- When the silence has reached `MaxSilence`, the guard ends the call: it
+  cancels the review's context with a cause, `ErrSilence`, whose text
+  names the silence it measured, says whether the machine slept or the
+  request carried no token, and tells the agent that the client has
+  probably given up and a retry starts a fresh round. Whatever phase the
+  call is in ends the way a cancellation does: a turn is interrupted and
+  the child reaped; a Git command, a checkout preparation, or a lock wait
+  returns on its context; the workflow lock is released after the child
+  has exited. The handler wraps the review's error with the cause so the
+  tool error says why the call ended. Heartbeats, when there is a token,
+  go on through the cleanup.
+- `MaxSilence` is the client's default idle timeout less one heartbeat
+  interval: 29 minutes 30 seconds. The client aborts when one of its
+  periodic checks sees silence of at least its timeout; every check before
+  Counterpoint's next tick sees at most the silence that tick measures; so
+  as long as the tick measures less than the timeout, the client has not
+  aborted, and the interval of margin covers the tick's own lateness. A
+  review running on for a client that has aborted is the incident. A
+  client configured with a longer idle timeout gets the same rule, since
+  Counterpoint cannot see the setting.
+- With heartbeats, silence at the first tick after a sleep of S is S plus
+  one interval, since the ticker runs on awake time and the previous tick
+  sent a heartbeat. So a sleep shorter than `MaxSilence` less one interval,
+  29 minutes, is survived, and a longer one ends the call within one
+  interval of wake. Without heartbeats, silence is the wall-clock age of
+  the call, so the guard bounds the whole call to `MaxSilence`, sleep or
+  no sleep; while awake the phases total at most 21 minutes plus Git and
+  cleanup, so an awake call reaches the bound only when Git is
+  pathologically slow, and a sleep is survived only while the call's
+  wall-clock length stays under the bound.
 
 ### Outcomes across a sleep
 
-With heartbeat interval H = 30 s, `MaxSleep` M = 29 min 30 s, the client's
-idle timeout I = 30 min, and a sleep of S in any phase of the call:
+With heartbeat interval H = 30 s, `MaxSilence` M = 29 min 30 s, the
+client's idle timeout I = 30 min, and a sleep of S in any phase of the
+call:
 
 | case | what happens on wake |
 |---|---|
-| S < M | The call continues with its budgets intact: a budget counts awake time, so the phase has exactly the time left that it had before the sleep. The next heartbeat goes out within H of wake, the client saw silence for at most S + H < I, and the review completes normally. The workflow lock stays held for the rest of the review, as for any review. |
-| S ≥ M | Within H of wake the guard ends the call: the turn, if one is running, is interrupted and the child reaped; a Git command or a lock wait returns; the lock is released after the child has exited, within about H plus ten seconds of cleanup; and the caller gets a tool error carrying `ErrSlept`. A client whose timer had not yet fired delivers that error to the agent; one that aborted on wake discards it, as in the incident; either way a retry starts a fresh round and nothing runs on unobserved. |
+| heartbeats, S < M − H (29 min) | The call continues with its budgets intact: a budget counts awake time, so the phase has exactly the time left that it had before the sleep. The next heartbeat goes out within H of wake, every check the client made saw silence under I, and the review completes normally. The workflow lock stays held for the rest of the review, as for any review. |
+| heartbeats, S ≥ M − H | Within H of wake the guard ends the call: the turn, if one is running, is interrupted and the child reaped; a Git command or a lock wait returns; the lock is released after the child has exited, within about H plus ten seconds of cleanup; and the caller gets a tool error carrying `ErrSilence`. A client whose timer had not yet fired delivers that error to the agent; one whose wake-time check ran before Counterpoint's tick, possible only when S + H ≥ I, aborted and discards it, as in the incident; either way a retry starts a fresh round and nothing runs on unobserved. |
+| no heartbeats | The same, with the call's wall-clock age in place of S + H: the call survives while its age stays under M, sleep included, and ends within H of the moment its age reaches M, awake or on wake. |
 
-"Counterpoint fails first" therefore holds across every sleep: below M the
-client's timer never fires; at or above M Counterpoint ends the call within
-H of wake, and the client's copy of the error is lost only when the
-client's own wake-time check beat the heartbeat, which the client's design
-makes unavoidable from the server side.
+"Counterpoint fails first" therefore holds in every row: the client's timer
+cannot fire before Counterpoint's tick measures M, and Counterpoint ends
+the call at that tick. The client's copy of the error is lost only when a
+sleep carried the silence past I in one step and the client's wake-time
+check beat the tick, which the client's design makes unavoidable from the
+server side.
 
 ### What does not change
 
@@ -216,8 +238,8 @@ makes unavoidable from the server side.
   guard reaches them through the request context they already honor.
 - The workflow-busy hint. A call the client moved to the background is
   still running and will deliver its result; that advice is now also right
-  after a sleep shorter than M, since the call survives it, and wrong for
-  at most H plus cleanup after a longer one.
+  after a sleep the call survives, and wrong for at most H plus cleanup
+  after one it does not.
 - Whether Counterpoint should hold an idle-sleep assertion during a review
   ([issue 36](https://github.com/SnapdragonPartners/counterpoint/issues/36)).
   Lid-close sleep stays the user's choice; this record makes the sleep
@@ -254,7 +276,20 @@ window is worth.
   `WithTimeout` does. Neither it nor any standard-library timer can measure
   a sleep; only comparing wall-clock readings across a tick can.
 - **A separate goroutine for the guard and for the heartbeat.** They share
-  a cadence and a wake-up; one loop measures the gap and then sends.
+  a cadence and a wake-up; one loop measures the silence and then sends.
+- **A guard that measures the machine's sleep (round 2).** The sleep
+  between two ticks is the wall-clock gap less the interval, and a guard
+  on it survives every sleep the client survives when heartbeats flow.
+  Without a token it guarantees nothing: the client's timer counts the
+  silence before the sleep as well, and a fifteen-minute turn plus a
+  sixteen-minute sleep aborts the call while a sleep guard lets the review
+  continue. Silence is what the client measures, so silence is what the
+  guard measures; with heartbeats the two guards differ only by one
+  interval.
+- **Sending a heartbeat immediately on detecting a wake.** The client's
+  own check runs on its own cadence, so an immediate heartbeat only
+  narrows the race band by at most one interval, and the guard ends the
+  call there anyway.
 - **Heartbeats from inside the review service, or only during the turn.**
   The service would have to learn a progress callback and the MCP session;
   and setup, checkout preparation, and cleanup are silent phases too. The
@@ -266,16 +301,12 @@ window is worth.
   requests from server to client, not progress on the in-flight call, and
   the client's idle timer counts responses and progress. They exist to
   detect a dead peer, which is not the problem.
-- **Sending a heartbeat immediately on detecting a wake.** The client's
-  own check runs on its own cadence, so an immediate heartbeat only
-  narrows the race band above M by at most one interval, and the guard
-  ends the call there anyway.
 - **Persisting in-flight state so an aborted call's result survives.**
   That is durable completion after client disconnect, which the
   specification defers, and it addresses the discarded result rather than
   the lost heartbeat. Out of scope here.
 
-## Round-1 findings
+## Review findings
 
 Codex reviewed round 1 (commit bb8be25) read-only and reported three
 findings, all on the wall-clock-budget design:
@@ -291,6 +322,16 @@ findings, all on the wall-clock-budget design:
   sleep leaves the lock held for the rest of the review. Resolved by
   scoping it to the row where the call ends.
 
+Codex reviewed round 2 (commit 8cefc10) read-only and reported one:
+
+- P1: the survival guarantee rested on a progress token the supported
+  client has not been seen to send, and the documented no-token path could
+  still reach the client's idle timeout from silence accumulated before
+  and during a sleep. Resolved by measuring silence rather than sleep,
+  which is safe with or without the token, and by a test of the no-token
+  path ending at the bound; the token's presence is left as an
+  observation for DR to authorize, with the design not depending on it.
+
 ## Tests
 
 - `internal/mcpserver`, over the in-memory transport with the cadence
@@ -304,11 +345,13 @@ findings, all on the wall-clock-budget design:
   gets an error result.
 - The guard, with the wall clock injected: a jump of an hour between ticks
   during a blocked turn ends the call within a few intervals with a tool
-  error carrying `ErrSlept` and the measured sleep, the reviewer closed and
-  the workflow lock released; the same jump during the final save, held
-  off by a state lock the test holds, ends the call the same way, which is
-  the unbudgeted-phase case; a jump shorter than `MaxSleep` ends nothing
-  and the call completes.
+  error carrying `ErrSilence` and the measured silence, the reviewer
+  closed and the workflow lock released; the same jump during the final
+  save, held off by a state lock the test holds, ends the call the same
+  way, which is the unbudgeted-phase case; a jump of twenty minutes ends
+  nothing and the call completes; without a token, a jump past
+  `MaxSilence` ends the call with an error that says no heartbeat could be
+  sent.
 - With the fake app-server subprocess in its stalled-turn scenario, driven
   through the real server and client: heartbeats arrive while the turn is
   stalled, and the client's cancellation reaches the child as
@@ -317,14 +360,14 @@ findings, all on the wall-clock-budget design:
   `internal/appserver` are unchanged.
 - Every regression test is checked by a real behavioral mutation before it
   is committed: a heartbeat that never sends, a guard that never fires, a
-  guard bound to the request's own cancellation, a cancellation that does
-  not reach the review context.
+  guard that resets its mark without sending, a cancellation that does not
+  reach the review context.
 
 ## Documentation
 
 The README's "Timeouts" section states that the budgets count awake time,
-the heartbeat cadence, the sleep guard and its threshold, what the client
-does on its idle timeout, and the two outcomes across a sleep in the terms
+the heartbeat cadence, the silence guard and its threshold, what the client
+does on its idle timeout, and the outcomes across a sleep in the terms
 above; the advice to keep the client's default idle timeout stays, with the
 heartbeat as the reason it no longer needs margin over the budgets. The
 tool description's "blocks until the review completes" sentence mentions
