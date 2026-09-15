@@ -393,9 +393,10 @@ every phase of the call honors the cancelled context: the turn is
 interrupted, a Git command or a lock wait returns, and the final save
 takes the state lock only while the context is live. Once it holds the
 lock, its read and rewrite of the state file do not recheck the context
-(Codex's round-5 correction), so a success returned after the guard fired
-means the round was persisted no later than the milliseconds that read
-and write take after the guard fired; nothing ran on. Returning that
+(Codex's round-5 correction), and those two file operations have no
+deadline of their own, so a success returned after the guard fired means
+the round was persisted, with nothing but that read and write happening
+after the guard fired; no review ran on. Returning that
 result costs nothing when the client is gone, since it discards the
 response either way, and is right when the client is still waiting.
 Replacing it with `ErrSilence` would tell the agent a round was lost and
