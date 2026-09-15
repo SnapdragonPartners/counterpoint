@@ -3,14 +3,15 @@
 Design record for
 [issue 35](https://github.com/SnapdragonPartners/counterpoint/issues/35).
 
-Status: Proposed; approved by Codex in round 3 of `fix/survive-sleep`
-(2026-09-14); awaiting DR's acceptance.
+Status: Accepted (Codex round 3 of `fix/survive-sleep`, 2026-09-14, and DR,
+2026-09-15)
 
 Settled between Claude and Codex over three read-only rounds on 2026-09-14
-before the code was written; the implementation on the same branch follows
-this document. Once it lands, the contract lives in the specification and
-the README, and this file keeps the evidence, the reasoning, and the
-rejected alternatives.
+before the code was written, and accepted by DR on 2026-09-15 with the
+amendment below; the implementation on the same branch follows this
+document. Once it lands, the contract lives in the specification and the
+README, and this file keeps the evidence, the reasoning, and the rejected
+alternatives.
 
 Round 1 proposed wall-clock phase budgets beside the heartbeat. Codex's
 findings on that round (recorded under "Rejected alternatives" and "Review
@@ -153,17 +154,16 @@ check, and the final save.
 - A request that carries no progress token gets no heartbeats, because a
   progress notification without a token has nothing to attach to, and one
   Info log line says so and names the bound the guard applies instead.
-  Whether Claude Code 2.1.270 sends a token on `tools/call` has not been
-  observed on the wire: its abort message names progress notifications as
-  what would have kept the call alive, and the MCP SDK it embeds delivers
-  a progress notification only to the request whose token it carries, so
-  a client that could not see them would have no reason to mention them;
-  but the binary is a compiled bundle and no captured log on this machine
-  holds a raw request. Observing it takes a Claude Code tool call, which
-  is a paid model call, so it is left for DR to authorize after install;
-  the log line is where the answer will appear. The design does not
-  depend on the answer: the guard is safe with or without the token, and
-  the token only decides how much silence a call can afford.
+  Claude Code 2.1.270 does send one: observed on 2026-09-15, with DR's
+  authorization, by pointing one `claude -p` call at a stdio server that
+  logs its raw input, the `tools/call` request carried
+  `_meta.progressToken` equal to the request's id (a JSON number, which
+  the go-sdk decodes as a float64 and the heartbeat returns unchanged) and
+  `_meta.claudecode/toolUseId`. The binary is a compiled bundle and no
+  captured log on this machine holds a raw request, so the probe was the
+  only way to see it. The design does not depend on the answer: the guard
+  is safe with or without the token, and the token only decides how much
+  silence a call can afford.
 - Heartbeats continue through cleanup after a lifecycle shutdown or the
   guard firing, so a client still waiting gets the error rather than a
   silence. A send that fails means the connection is gone; it is logged
@@ -331,8 +331,19 @@ Codex reviewed round 2 (commit 8cefc10) read-only and reported one:
   still reach the client's idle timeout from silence accumulated before
   and during a sleep. Resolved by measuring silence rather than sleep,
   which is safe with or without the token, and by a test of the no-token
-  path ending at the bound; the token's presence is left as an
-  observation for DR to authorize, with the design not depending on it.
+  path ending at the bound; the token was then observed on the wire on
+  2026-09-15 (see "Heartbeats").
+
+Codex reviewed round 4 (commit fc61bf4, the implementation, build-capable)
+and round 5 (commit ad57bed, documentation) and reported one finding both
+times:
+
+- P1: the handler returns a success when the review completes as the
+  guard fires; check the context's cause regardless of the error. Declined
+  with reasons, recorded under "Amendments"; reaffirmed by Codex in round
+  5 with the correction that the state file's read and write do not
+  recheck the context once the lock is held; escalated to DR, who upheld
+  the decline on 2026-09-15 as an extreme edge case.
 
 ## Tests
 
@@ -371,24 +382,27 @@ Codex reviewed round 2 (commit 8cefc10) read-only and reported one:
 
 ## Amendments
 
-**2026-09-14, after Codex's round-4 review of the implementation.** A
-review that completes as the guard fires is returned as a success, not
-suppressed. Codex asked the handler to check for `ErrSilence` after the
-review returns regardless of its error, because a review can complete
-concurrently with the watcher reaching `MaxSilence` and the client has
-probably discarded the call by then. The guard exists to stop a review
-from running on for a client that has given up, and every phase of the
-call honors the cancelled context: the turn is interrupted, a Git command
-or a lock wait returns, and the final save takes the state lock only while
-the context is live. A success after the guard therefore means the review
-had already completed and its record had been saved when the guard
-fired; nothing ran on. Returning that result costs nothing when the
-client is gone, since it discards the response either way, and is right
-when the client is still waiting. Replacing it with `ErrSilence` would
-tell the agent a round was lost and to start a fresh one, when the round
-is persisted and the next identical request replays it. The race window is
-the moments between the save and the handler's return, and the outcome
-in it is the better one.
+**2026-09-14, after Codex's round-4 review of the implementation; upheld
+by DR on 2026-09-15.** A review that completes as the guard fires is
+returned as a success, not suppressed. Codex asked the handler to check
+for `ErrSilence` after the review returns regardless of its error, because
+a review can complete concurrently with the watcher reaching `MaxSilence`
+and the client has probably discarded the call by then. The guard exists
+to stop a review from running on for a client that has given up, and
+every phase of the call honors the cancelled context: the turn is
+interrupted, a Git command or a lock wait returns, and the final save
+takes the state lock only while the context is live. Once it holds the
+lock, its read and rewrite of the state file do not recheck the context
+(Codex's round-5 correction), so a success returned after the guard fired
+means the round was persisted no later than the milliseconds that read
+and write take after the guard fired; nothing ran on. Returning that
+result costs nothing when the client is gone, since it discards the
+response either way, and is right when the client is still waiting.
+Replacing it with `ErrSilence` would tell the agent a round was lost and
+to start a fresh one, when the round is persisted and the next identical
+request replays it. The race window is the moments between taking the
+state lock and the handler's return, and the outcome in it is the better
+one. DR judged the case an extreme edge and upheld the decline.
 
 ## Documentation
 

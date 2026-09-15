@@ -96,8 +96,9 @@ twenty-one minutes by that cleanup time plus however long Git takes.
 While a call runs, from the request's arrival until the result is returned,
 Counterpoint sends an MCP progress notification every thirty seconds, so a
 client's idle timeout does not fire on a review that is merely slow. The
-notification carries the progress token the client put on the request; a
-request without one gets no heartbeats and a log line saying so. At the same
+notification carries the progress token the client put on the request,
+which Claude Code sends on every tool call; a request without one gets no
+heartbeats and a log line saying so. At the same
 cadence Counterpoint measures the call's silence toward the client, the
 wall-clock time since the last heartbeat it sent, or since the request when
 it could send none, and ends the call once that reaches twenty-nine and a
