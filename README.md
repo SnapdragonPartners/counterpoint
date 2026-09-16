@@ -103,7 +103,10 @@ cadence Counterpoint measures the call's silence toward the client, the
 wall-clock time since the last heartbeat it sent, or since the request when
 it could send none, and ends the call once that reaches twenty-nine and a
 half minutes: the turn is interrupted, the child reaped, the workflow lock
-released, and the tool error says the call went silent and why. With
+released, and the tool error says the call went silent and why. A review
+that has already completed and been recorded when the bound is reached is
+returned as a success, since the next identical request would replay it.
+With
 heartbeats, silence grows only while the machine sleeps, so a sleep shorter
 than twenty-nine minutes is survived with the budgets untouched and a longer
 one ends the call within thirty seconds of wake. Without a token the bound

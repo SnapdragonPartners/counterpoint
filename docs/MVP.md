@@ -596,7 +596,10 @@ time since the last heartbeat sent or since the request when none was, and
 ends the call once that reaches the client's default idle timeout less one
 interval, twenty-nine minutes and thirty seconds, in whatever phase the
 call is: the turn is interrupted, the child reaped, the lock released, and
-the tool error names the silence and its reason. Every client check before
+the tool error names the silence and its reason; a review that has already
+completed and been recorded when the bound is reached is returned as a
+success, since the next identical request would replay it. Every client
+check before
 Counterpoint's next tick sees at most the silence that tick measures, so
 the client's timer cannot fire first. With heartbeats, silence grows only
 while the machine sleeps: a sleep shorter than twenty-nine minutes is

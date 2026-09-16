@@ -104,7 +104,7 @@ func newServer(lifecycle context.Context, svc *review.Service, version string, l
 		Name: ToolName,
 		Description: "Ask the persistent Codex reviewer for this repository and branch to review a local commit. " +
 			"Blocks until the review completes: up to sixty seconds of setup plus a twenty-minute review turn, " +
-			"sending a progress notification every thirty seconds meanwhile so the client's idle timeout does not fire. " +
+			"sending a progress notification every thirty seconds meanwhile, when the request carries a progress token, so the client's idle timeout does not fire. " +
 			"Counterpoint never pushes, opens pull requests, merges, or edits the repository.",
 	}, func(reqCtx context.Context, req *mcp.CallToolRequest, in Input) (*mcp.CallToolResult, Output, error) {
 		ctx, cancel := context.WithCancelCause(reqCtx)

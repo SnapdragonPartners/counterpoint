@@ -224,12 +224,14 @@ call:
 | heartbeats, S ≥ M − H | Within H of wake the guard ends the call: the turn, if one is running, is interrupted and the child reaped; a Git command or a lock wait returns; the lock is released after the child has exited, within about H plus ten seconds of cleanup; and the caller gets a tool error carrying `ErrSilence`. A client whose timer had not yet fired delivers that error to the agent; one whose wake-time check ran before Counterpoint's tick, possible only when S + H ≥ I, aborted and discards it, as in the incident; either way a retry starts a fresh round and nothing runs on unobserved. |
 | no heartbeats | The same, with the call's wall-clock age in place of S + H: the call survives while its age stays under M, sleep included, and ends within H of the moment its age reaches M, awake or on wake. |
 
-"Counterpoint fails first" therefore holds in every row: the client's timer
-cannot fire before Counterpoint's tick measures M, and Counterpoint ends
-the call at that tick. The client's copy of the error is lost only when a
-sleep carried the silence past I in one step and the client's wake-time
-check beat the tick, which the client's design makes unavoidable from the
-server side.
+"Counterpoint fails first" therefore holds in every row while the machine
+is awake, and across every sleep that does not carry the silence past I in
+one step: the client's timer cannot fire before Counterpoint's tick
+measures M, and Counterpoint ends the call at that tick. The one exception
+is a sleep that carries the silence past I in one step, after which the
+client's wake-time check may beat the tick; Counterpoint still ends the
+call at the tick, but the client's copy of the error is lost, which the
+client's design makes unavoidable from the server side.
 
 ### What does not change
 
@@ -404,6 +406,28 @@ to start a fresh one, when the round is persisted and the next identical
 request replays it. The race window is the moments between taking the
 state lock and the handler's return, and the outcome in it is the better
 one. DR judged the case an extreme edge and upheld the decline.
+
+**2026-09-16, after Copilot's review of PR 37.** A heartbeat write that a
+connected client stops reading is not bounded separately. Copilot asked
+that each notification write be bounded independently and that a failed
+send end the review, since `NotifyProgress` receives the watcher's
+context and a blocked write would keep the watcher from its next silence
+check. In go-sdk v1.7.0 the stdio connection's `Write` checks the context
+only before taking the write mutex and calling the pipe write
+(`mcp/transport.go`, `ioConn.Write`), so a per-send timeout would not
+unblock a stuck write; only a wedged goroutine per send could keep the
+watcher ticking. That buys nothing measurable: a client that is connected
+but not reading stdout blocks the SDK's own response write behind the same
+mutex, so the result could not be delivered either way; the client is the
+same-user process that ADR 0001 places outside the threat model; and the
+awake-time phase budgets, sixty seconds and twenty minutes, are shorter
+than the silence bound, so a review whose heartbeat write is stuck still
+ends on its budget before the guard could have ended it, and the
+unbudgeted phases are bounded by their lock waits and by Git. A failed
+send, as opposed to a stuck one, already stops the watcher and leaves the
+review to those budgets; the cancellation that reaches it when the
+connection drops is the SDK's. Declined; the thread on the pull request
+carries the same reasons.
 
 ## Documentation
 
