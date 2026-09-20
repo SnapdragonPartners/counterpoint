@@ -443,12 +443,14 @@ input, and the sandbox is what keeps a review inside its checkout
 (ADR 0001).
 
 As defense in depth, every server-originated request still receives an
-explicit bounded response: command and file-change approvals, including
-the legacy method names, are answered `decline`, which lets the turn
-continue, never `cancel`, which would interrupt it; permission requests
-receive an empty grant; user-input requests receive empty answers; and any
-other request receives a JSON-RPC method-not-found error. Each is recorded
-as a warning and in the log.
+explicit bounded response: command and file-change approvals are
+answered `decline`, which lets the turn continue, never `cancel`, which
+would interrupt it; the legacy approval methods, whose response shape is a
+`decision` object rather than a string, are answered with a `denied`
+decision carrying a rejection message; permission requests receive an
+empty grant; user-input requests receive empty answers; and any other
+request receives a JSON-RPC method-not-found error. Each is recorded as a
+warning and in the log.
 
 ### Model and reasoning effort
 
