@@ -7,9 +7,7 @@ summary = "The accepted contract for Counterpoint as it is: one blocking MCP rev
 
 # Counterpoint Specification
 
-Status: Proposed (under review on `docs/spec-rewrite`; binds once this line
-records Codex and DR acceptance in a commit an earlier round approved, per
-ADR 0002)
+Status: Accepted (Codex round 1 of `docs/spec-rewrite` and DR, 2026-09-20)
 
 This document is the accepted contract for Counterpoint's current behavior.
 It ranks below code and tests, which describe the runtime, and above the
