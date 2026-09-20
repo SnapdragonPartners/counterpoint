@@ -141,6 +141,21 @@ normally needs no change.
 - Bridge warnings returned with a review are capped at 32 entries totalling at
   most 8 KiB (8,192 bytes). When any are omitted, one additional final entry
   reports the omitted count; that marker is not counted against either cap.
+- A build-capable review runs offline, with no network and no access to
+  Docker or any other service on the machine, and there is no switch to
+  change that. The reviewer acts on untrusted input (the commit, the branch
+  notes, the repository's `COUNTERPOINT.md`), so the sandbox is what keeps a
+  review from touching anything outside its checkout (`docs/adr/0001-threat-model.md`).
+  A Docker socket would undo that entirely: the daemon runs as root outside
+  the sandbox and will mount any host path into a container, and a network
+  would let the reviewer send the repository anywhere. Tests that need a
+  database, a message broker, or another service belong to CI, not to the
+  review. Make them skip cleanly when the service is absent, so the reviewer
+  runs the offline subset and reports the rest as not run, as this
+  repository's own `COUNTERPOINT.md` does for lint tooling that needs a
+  download; and put the integration run's commands and outcomes in the branch
+  notes, which the reviewer checks against the commit rather than takes on
+  trust.
 
 ## Installation and use
 
