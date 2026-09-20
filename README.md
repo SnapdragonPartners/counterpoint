@@ -84,21 +84,52 @@ reviewers, remote execution, push/PR automation, and a general workflow engine.
 Counterpoint applies two fixed phase budgets inside a review call: sixty
 seconds for setup, which covers starting `codex app-server`, its handshake, and
 starting or resuming the thread, and then twenty minutes for the review turn
-itself. These are not a bound on the whole call. Lock acquisition waits up to
-two seconds at the start (thirty when recording a completed review), Git
-validation and state persistence have no Counterpoint deadline, and cleanup
-after a failure or cancellation can add up to five seconds waiting for the turn
-to interrupt and five more waiting for the child to exit before it is killed. A
-call that hits every budget can exceed twenty-one minutes by that cleanup time
-plus however long Git takes.
+itself. Both count awake time: Go's timers stop while the machine sleeps, so
+a sleep never consumes budget. These are not a bound on the whole call. Lock
+acquisition waits up to two seconds at the start (thirty when recording a
+completed review), Git validation and state persistence have no Counterpoint
+deadline, and cleanup after a failure or cancellation can add up to five
+seconds waiting for the turn to interrupt and five more waiting for the child
+to exit before it is killed. A call that hits every budget can exceed
+twenty-one minutes by that cleanup time plus however long Git takes.
 
-Claude Code separately aborts a stdio MCP tool call that has produced no
-response for thirty minutes by default, controlled by the
+While a call runs, from the request's arrival until the result is returned,
+Counterpoint sends an MCP progress notification every thirty seconds, so a
+client's idle timeout does not fire on a review that is merely slow. The
+notification carries the progress token the client put on the request,
+which Claude Code sends on every tool call; a request without one gets no
+heartbeats and a log line saying so. At the same
+cadence Counterpoint measures the call's silence toward the client, the
+wall-clock time since the last heartbeat it sent, or since the request when
+it could send none, and ends the call once that reaches twenty-nine and a
+half minutes: the turn is interrupted, the child reaped, the workflow lock
+released, and the tool error says the call went silent and why. A review
+that has already completed and been recorded when the bound is reached is
+returned as a success, since the next identical request would replay it.
+With
+heartbeats, silence grows only while the machine sleeps, so a sleep shorter
+than twenty-nine minutes is survived with the budgets untouched and a longer
+one ends the call within thirty seconds of wake. Without a token the bound
+applies to the call's whole wall-clock length, sleep or not.
+
+Claude Code aborts a stdio MCP tool call that has produced no response and no
+progress notification for thirty minutes by default, controlled by the
 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` environment variable in milliseconds. Keep
-that default; it leaves adequate margin over the phase budgets. Do not lower it
-to anything near twenty-one minutes. The per-call wall-clock limit,
-`MCP_TOOL_TIMEOUT` or the per-server `timeout` field in `.mcp.json`, defaults
-to many hours and normally needs no change.
+that default: the heartbeat holds it off while Counterpoint runs, and the
+silence bound is derived from it so that Counterpoint gives up first. Do not
+lower it to anything near the heartbeat interval. The abort does not cancel
+the call on Counterpoint's side; that is why Counterpoint ends the call
+itself rather than run a review for a client that has given up, which is
+what happened in the incident behind
+[issue 35](https://github.com/SnapdragonPartners/counterpoint/issues/35)
+(`docs/design/sleep-survival.md`). A cancellation the client does send, or
+closing the connection, interrupts the review at once. After a sleep long
+enough to reach the client's timeout in one step, the client may abort on
+wake before Counterpoint's next tick and discard the error it is sent; the
+lock is still free within about forty seconds of wake, and a retry starts a
+fresh round. The per-call wall-clock limit, `MCP_TOOL_TIMEOUT` or the
+per-server `timeout` field in `.mcp.json`, defaults to many hours and
+normally needs no change.
 
 ## Limits
 
