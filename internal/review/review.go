@@ -28,7 +28,7 @@ const (
 	// idle timeout so Counterpoint fails first with a clear error.
 	Timeout = 20 * time.Minute
 
-	// ReasoningEffort is the fixed reviewer effort for the MVP, passed to
+	// ReasoningEffort is the fixed reviewer effort, passed to
 	// the app-server as a configuration override.
 	ReasoningEffort = "xhigh"
 

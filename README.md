@@ -15,10 +15,11 @@ and a reviewer without becoming a general-purpose orchestrator.
 
 ## Status
 
-The MVP described in the [MVP specification](docs/MVP.md) is complete. It is
-covered by automated tests against a fake app-server and was accepted in a
-live run against a real Codex CLI; the specification records the status and
-links the follow-up issues.
+Counterpoint is in use, released through the Homebrew tap described under
+"Installation and use". The [specification](docs/SPEC.md) is the accepted
+contract for its behavior; it is covered by automated tests against a fake
+app-server, and every change since the first release has been reviewed
+through the tool itself.
 
 ## Intended workflow
 
@@ -51,9 +52,9 @@ Claude Code (or another MCP client)
               `-- one persistent Codex thread per repository + branch
 ```
 
-## MVP shape
+## Shape
 
-The MVP is a Go executable that:
+Counterpoint is a Go executable that:
 
 - serves one blocking MCP tool over stdio;
 - launches a local `codex app-server` process per review and uses its inline
@@ -67,8 +68,9 @@ The MVP is a Go executable that:
   with a timeout; and
 - returns Codex's review, plus any bridge warnings, to the MCP client.
 
-The MVP deliberately excludes a resident daemon, background jobs, multiple
-reviewers, remote execution, push/PR automation, and a general workflow engine.
+It deliberately excludes a resident daemon, background jobs, multiple
+reviewers, remote execution, push/PR automation, and a general workflow
+engine; the specification lists what is out of scope.
 
 ## Prerequisites
 

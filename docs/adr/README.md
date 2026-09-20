@@ -12,7 +12,7 @@ numbered sequence. An ADR records a decision that cuts across issues, such as
 the threat model or documentation authority, so that later design records,
 reviews, and code build on it instead of re-deriving it. Per-issue design
 work stays in `docs/design/`; the accepted product contract stays in
-`docs/MVP.md`.
+`docs/SPEC.md`.
 
 Lifecycle: Proposed, then Accepted with Codex and DR approval, then
 Superseded or Rejected. A superseding ADR names the one it replaces. An ADR

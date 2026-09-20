@@ -1,7 +1,7 @@
 // Package gitrepo validates review targets against a local Git repository.
 //
 // It implements the repository validation and review-target rules in
-// docs/MVP.md: canonical repository identity, local branch normalization,
+// docs/SPEC.md: canonical repository identity, local branch normalization,
 // commit resolution, branch-tip and HEAD equality, clean-worktree detection,
 // merge-base resolution against the primary branch, and rewritten-history
 // detection. Every Git invocation uses an argument array; nothing is passed

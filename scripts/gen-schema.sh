@@ -6,7 +6,7 @@
 # Output always goes to .schema/ at the repository root; the directory is
 # gitignored and is the only path this script deletes. VERSION inside it
 # records the CLI that produced the bundle so protocol claims can be checked
-# against docs/MVP.md, which names the version Counterpoint is developed
+# against docs/SPEC.md, which names the version Counterpoint is developed
 # against.
 set -eu
 

@@ -1,6 +1,6 @@
 # Reviewer instructions for Counterpoint
 
-- `docs/MVP.md` is the accepted contract; `CLAUDE.md` holds the engineering
+- `docs/SPEC.md` is the accepted contract; `CLAUDE.md` holds the engineering
   invariants. Check changes against both, and flag any divergence between
   code and specification rather than resolving it silently.
 - Verification is `make check` (gofmt, vet, golangci-lint, `go test -race`).

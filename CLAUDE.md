@@ -15,19 +15,19 @@ a general-purpose orchestrator and must stop at the human push/PR gate.
 Use the source appropriate to the question. For current behavior, precedence is:
 
 1. Code and tests.
-2. `docs/MVP.md` for the accepted MVP contract.
+2. `docs/SPEC.md` for the accepted product contract.
 3. Accepted ADRs in `docs/adr/` for cross-cutting decisions such as the
    threat model; per-issue design records in `docs/design/` build on them.
 4. `README.md` for orientation.
 5. Issues and discussion as non-binding context.
 
-When code and the MVP specification differ, code describes the current runtime
-and the specification describes the intended MVP. Do not silently resolve the
-difference: identify it and either fix the implementation or obtain DR's
-approval to change the specification.
+When code and the specification differ, code describes the current runtime
+and the specification describes the accepted contract. Do not silently
+resolve the difference: identify it and either fix the implementation or
+obtain DR's approval to change the specification.
 
 Keep this file focused on durable operating rules. Put product behavior and
-acceptance criteria in `docs/MVP.md`, not here.
+its limits in `docs/SPEC.md`, not here.
 
 ## Roles
 
@@ -168,7 +168,7 @@ the author's claims are correct.
 ## Documentation
 
 - `README.md` explains the product and points to authoritative detail.
-- `docs/MVP.md` owns MVP scope, requirements, deferrals, and acceptance.
+- `docs/SPEC.md` owns product behavior, limits, and what is out of scope.
 - Update documentation in the same change when behavior or a public contract
   changes.
 - Do not claim planned behavior is implemented.
