@@ -8,7 +8,7 @@ Status: Accepted (Codex round 2 of `feat/per-workflow-locks` and DR,
 
 Settled between DR, Claude, and Codex on 2026-09-08 before the code was
 written; the implementation on the same branch follows this document. Once it
-lands, the contract lives in `docs/MVP.md` and this file keeps the reasoning
+lands, the contract lives in `docs/SPEC.md` and this file keeps the reasoning
 and the rejected alternatives.
 
 ## Problem
@@ -40,7 +40,7 @@ From `CLAUDE.md`:
   workflows' history and must keep running under whatever protects the file.
 - The child process exits before the lock that represents thread ownership
   is released, because Codex's per-thread writer lock is handed over that way
-  (`docs/MVP.md`, "Codex app-server integration").
+  (`docs/SPEC.md`, "The Codex session").
 
 ## Design
 

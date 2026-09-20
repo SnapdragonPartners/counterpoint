@@ -1,5 +1,5 @@
 // Command counterpoint is an MCP stdio server that hands local commits to a
-// persistent Codex review thread. See docs/MVP.md for the accepted contract.
+// persistent Codex review thread. See docs/SPEC.md for the accepted contract.
 package main
 
 import (

@@ -1,5 +1,5 @@
 // Package appserver speaks JSON-RPC over JSONL stdio to a codex app-server
-// child process and implements the protocol subset in docs/MVP.md: the
+// child process and implements the protocol subset in docs/SPEC.md: the
 // initialize handshake, thread start and resume, an inline custom review on
 // the persistent thread, turn completion, interruption, and bounded declines
 // for every server-originated request.

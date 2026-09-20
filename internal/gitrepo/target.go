@@ -55,7 +55,7 @@ func (r *Repository) ResolveCommit(ctx context.Context, commitish string) (strin
 	return oid, nil
 }
 
-// ValidateTarget applies the review-target rules from docs/MVP.md in order:
+// ValidateTarget applies the review-target rules from docs/SPEC.md in order:
 // the branch exists and is not the primary branch, the commit resolves and
 // equals both the branch tip and the worktree HEAD, the worktree is clean,
 // and a merge base with the primary branch exists. previousTip, when not

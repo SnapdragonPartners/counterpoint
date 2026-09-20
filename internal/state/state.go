@@ -2,7 +2,7 @@
 // serializes reviews across processes.
 //
 // The state file is a versioned JSON envelope keyed by workflow key (see
-// docs/MVP.md). Writes are atomic: a temporary file in the same directory is
+// docs/SPEC.md). Writes are atomic: a temporary file in the same directory is
 // written, synced, and renamed over the old file, so a crash leaves either the
 // old complete state or the new complete state. A file that fails to parse is
 // reported and never overwritten.

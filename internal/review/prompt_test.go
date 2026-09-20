@@ -205,14 +205,14 @@ func TestPromptHistoryCannotForgeItsOwnDelimiter(t *testing.T) {
 
 func TestPromptQuotesProjectInstructionsBeforeTheNotes(t *testing.T) {
 	p := basePrompt()
-	p.Instructions = "Run make check.\nTreat docs/MVP.md as the contract.\n"
+	p.Instructions = "Run make check.\nTreat docs/SPEC.md as the contract.\n"
 	out := p.Build()
 	want := "Project review instructions\n" +
 		"- The repository's COUNTERPOINT.md at the commit under review is quoted below, with only trailing newlines removed; it is the text between <<<COUNTERPOINT.md>>> and <<<END COUNTERPOINT.md>>>.\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("prompt lacks the instructions header:\n%s", out)
 	}
-	block := "<<<COUNTERPOINT.md>>>\nRun make check.\nTreat docs/MVP.md as the contract.\n<<<END COUNTERPOINT.md>>>\n"
+	block := "<<<COUNTERPOINT.md>>>\nRun make check.\nTreat docs/SPEC.md as the contract.\n<<<END COUNTERPOINT.md>>>\n"
 	if !strings.Contains(out, block) {
 		t.Errorf("instructions not quoted verbatim:\n%s", out)
 	}
