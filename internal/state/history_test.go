@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -103,12 +104,12 @@ func TestRetainHistoryBounds(t *testing.T) {
 
 	// Per-record: an oversized verdict is a placeholder, never truncated.
 	big := strings.Repeat("b", MaxHistoryRecordBytes+1)
-	h = RetainHistory(nil, NewHistoryRecord(1, oidA, oidB, big), "two")
+	h = RetainHistory(nil, NewHistoryRecord(1, oidA, oidB, big, nil), "two")
 	if len(h) != 1 || h[0].Review != "" || h[0].Omitted != OmittedTooLarge || h[0].Round != 1 {
 		t.Errorf("oversized record = %+v", h)
 	}
 	exact := strings.Repeat("e", MaxHistoryRecordBytes)
-	if r := NewHistoryRecord(1, oidA, oidB, exact); r.Review != exact || r.Omitted != "" {
+	if r := NewHistoryRecord(1, oidA, oidB, exact, nil); r.Review != exact || r.Omitted != "" {
 		t.Errorf("record at the bound was not kept verbatim: omitted=%q len=%d", r.Omitted, len(r.Review))
 	}
 
@@ -199,5 +200,76 @@ func TestInvalidHistoryRejectsEveryBadShape(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Usage is untrusted file content. Only non-negativity is enforced: which
+// counters are subsets of which varies by model, so a relationship rule
+// invented here would reject valid files.
+func TestInvalidHistoryRejectsNegativeUsage(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	ok := UsageBreakdown{Input: 10, Cached: 4, CacheWrite: 1, Output: 5, Reasoning: 2, Total: 15}
+	for name, u := range map[string]*Usage{
+		"last input":      {Last: UsageBreakdown{Input: -1}, Total: ok},
+		"last total":      {Last: UsageBreakdown{Total: -1}, Total: ok},
+		"total reasoning": {Last: ok, Total: UsageBreakdown{Reasoning: -1}},
+		"total cached":    {Last: ok, Total: UsageBreakdown{Cached: -1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := Workflow{Round: 2, LastReview: "r", History: []HistoryRecord{
+				{Round: 1, Commit: oid, Base: oid, Review: "r", Usage: u},
+			}}
+			if got := w.InvalidHistory(); got == "" {
+				t.Error("accepted a negative counter")
+			}
+			// The description names the defect without echoing values.
+			if got := w.InvalidHistory(); strings.Contains(got, "-1") {
+				t.Errorf("description echoes a value: %s", got)
+			}
+		})
+	}
+
+	// The newest review's usage is checked too, not only the records'.
+	w := Workflow{Round: 1, LastReview: "r", LastUsage: &Usage{Last: UsageBreakdown{Output: -5}, Total: ok}}
+	if w.InvalidHistory() == "" {
+		t.Error("accepted a negative counter on the newest review")
+	}
+
+	// Valid usage, and absent usage, both hold.
+	w = Workflow{Round: 2, LastReview: "r", LastUsage: &Usage{Last: ok, Total: ok},
+		History: []HistoryRecord{{Round: 1, Commit: oid, Base: oid, Review: "r", Usage: &Usage{Last: ok, Total: ok}}}}
+	if got := w.InvalidHistory(); got != "" {
+		t.Errorf("rejected valid usage: %s", got)
+	}
+	w.LastUsage = nil
+	w.History[0].Usage = nil
+	if got := w.InvalidHistory(); got != "" {
+		t.Errorf("rejected absent usage: %s", got)
+	}
+}
+
+// A state file written before usage was tracked must load unchanged, with
+// usage absent rather than zero: reporting zero would understate a total.
+func TestUsageAbsentIsUnknownNotZero(t *testing.T) {
+	oid := strings.Repeat("b", 40)
+	var w Workflow
+	if err := json.Unmarshal([]byte(`{"thread_id":"t","last_commit":"`+oid+`","last_base":"`+oid+
+		`","last_request_hash":"h","round":2,"last_review":"r","history":[{"round":1,"commit":"`+oid+
+		`","base":"`+oid+`","review":"old"}]}`), &w); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if w.LastUsage != nil {
+		t.Errorf("LastUsage = %+v, want nil for a pre-change file", w.LastUsage)
+	}
+	if w.History[0].Usage != nil {
+		t.Errorf("history usage = %+v, want nil", w.History[0].Usage)
+	}
+	// It round-trips back out without inventing a usage object.
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "usage") {
+		t.Errorf("absent usage was written back as a value: %s", b)
 	}
 }

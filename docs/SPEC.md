@@ -262,9 +262,12 @@ a versioned JSON envelope:
       "round": 3,
       "last_review": "the round-three verdict",
       "last_warnings": ["..."],
+      "last_usage": {"last": {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0, "total": 0},
+                     "total": {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0, "total": 0}},
       "history": [
         {"round": 1, "commit": "<id>", "base": "<id>", "omitted": "too-large"},
-        {"round": 2, "commit": "<id>", "base": "<id>", "review": "the round-two verdict"}
+        {"round": 2, "commit": "<id>", "base": "<id>", "review": "the round-two verdict",
+         "usage": {"last": {"...": 0}, "total": {"...": 0}}}
       ]
     }
   }
@@ -671,9 +674,53 @@ control.
 Diagnostics go to stderr so they cannot corrupt the MCP or app-server
 streams. Each review is logged with a request correlation id, workflow key,
 round, abbreviated thread id, turn id, configured and reported model and
-effort, duration, terminal status, warnings count, and any declined
-request. Logs do not include branch notes, model output, credentials, or
-environment dumps by default.
+effort, duration, terminal status, warnings count, the round's token usage
+when the app-server reported any, and any declined request. Logs do not
+include branch notes, model output, credentials, or environment dumps by
+default.
+
+## Token usage
+
+Counterpoint records what each completed round cost. The app-server reports
+usage in `thread/tokenUsage/updated`, carrying a `last` breakdown and a
+`total` one; both are kept, in `last_usage` on the workflow for the newest
+round and in `usage` on a history record for a retained earlier round. The
+counters are input, cached input, cache writes, output, reasoning output,
+and the total. Only non-negativity is validated: which counters are subsets
+of which varies by model, so a relationship rule would reject valid files.
+
+Usage is not returned to the calling agent. The review tool's result is the
+reviewer's verdict; usage goes to the log line and to `counterpoint
+--usage`, which loads the state file, prints what is recorded, and exits
+without starting the MCP server. The report is per workflow, newest round
+first, and names the state file it read.
+
+Three limits are deliberate and are stated in the report:
+
+- **Completed rounds only.** A review that failed, timed out, or was
+  interrupted still spent tokens and is not recorded, because persisting a
+  round that produced no verdict cuts against completed-only persistence.
+  The totals are therefore a floor on what was spent.
+- **Usage dies with the records it describes.** A history record evicted
+  under size pressure takes its usage with it, and the newest round's usage
+  is replaced when the next round completes. Anything needing longer life is
+  extracted to storage outside Counterpoint. The workflow's `last_usage`
+  total is the exception in practice: it is cumulative for the thread, so it
+  survives eviction of the per-round detail.
+- **Absent is unknown, not zero.** A round reviewed before usage was
+  tracked, or whose app-server reported none, prints as not recorded.
+
+The `total` breakdown is cumulative for the thread as the app-server
+reports it, and Counterpoint resumes one thread per workflow across rounds,
+so the newest round's total is taken to be the branch's lifetime spend. The
+app-server schema does not document the scope of either breakdown, and no
+automated test can settle it, because the fake answers whatever it is told
+to. Until a live run confirms it the report labels the figure as reported
+by the app-server rather than as established.
+
+Tokens are reported, never money. The protocol carries no pricing, and a
+hardcoded rate table would go stale silently and be wrong for any user on a
+different plan.
 
 ## Configuration
 
@@ -754,6 +801,10 @@ configuration file does own is listed under "Configuration".
 | Unused build cache retention | 72 h |
 | Git stdout captured; stderr captured; stderr quoted | 1 MiB; 64 KiB; 512 B |
 | Lock file and scratch directory name | 16 hex characters of SHA-256 |
+
+Non-server modes: `--version` prints the version, `--usage` prints
+recorded token usage (see "Token usage"); both write to stdout and exit
+without starting the MCP transport.
 
 Environment variables Counterpoint reads: `COUNTERPOINT_STATE_FILE`,
 `COUNTERPOINT_CHECKOUT_DIR`, and `COUNTERPOINT_CONFIG_FILE`, all absolute

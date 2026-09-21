@@ -153,6 +153,10 @@ type Result struct {
 	// Replayed is true when an identical completed request was answered
 	// from state without a new Codex turn.
 	Replayed bool
+	// Usage is what the round cost, nil on a replay or when the
+	// app-server reported none. It is logged and persisted; the review
+	// tool's result does not carry it.
+	Usage *state.Usage
 }
 
 // Options configures a Service.
@@ -234,9 +238,16 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 	case err != nil:
 		s.log.Warn("review finished", "request", RequestIDFrom(ctx), "status", "failed", "duration", time.Since(start), "error", err)
 	case res.Replayed:
+		// A replay runs no turn and spends nothing, so it reports no usage.
 		s.log.Info("review finished", "request", RequestIDFrom(ctx), "status", "replayed", "round", res.Round, "duration", time.Since(start))
 	default:
-		s.log.Info("review finished", "request", RequestIDFrom(ctx), "status", "completed", "round", res.Round, "duration", time.Since(start), "warnings", len(res.Warnings))
+		args := []any{"request", RequestIDFrom(ctx), "status", "completed", "round", res.Round,
+			"duration", time.Since(start), "warnings", len(res.Warnings)}
+		if u := res.Usage; u != nil {
+			args = append(args, "tokens", u.Last.Total, "input", u.Last.Input, "cached", u.Last.Cached,
+				"output", u.Last.Output, "reasoning", u.Last.Reasoning, "thread_tokens", u.Total.Total)
+		}
+		s.log.Info("review finished", args...)
 	}
 	return res, err
 }
@@ -354,7 +365,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	// the prompt, oldest first, with the evicted rounds disclosed by count.
 	var previous state.HistoryRecord
 	if known {
-		previous = state.NewHistoryRecord(wf.Round, wf.LastCommit, wf.LastBase, wf.LastReview)
+		previous = state.NewHistoryRecord(wf.Round, wf.LastCommit, wf.LastBase, wf.LastReview, wf.LastUsage)
 		prompt.History = append(append([]state.HistoryRecord{}, wf.History...), previous)
 		prompt.OmittedRounds = prompt.History[0].Round - 1
 	}
@@ -491,6 +502,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 
 	done := state.Workflow{
 		ThreadID:        thread.ID,
+		LastUsage:       usageFrom(rev.Usage),
 		LastCommit:      target.Commit,
 		LastBase:        target.Base,
 		LastRequestHash: hash,
@@ -506,7 +518,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 
 	return &Result{
 		Repo: repo.Worktree, Branch: branch.Ref, Commit: target.Commit, Base: target.Base,
-		Round: round, Review: rev.Text, Warnings: rev.Warnings,
+		Round: round, Review: rev.Text, Warnings: rev.Warnings, Usage: done.LastUsage,
 	}, nil
 }
 
@@ -654,12 +666,29 @@ func (s *Service) saveEvictingHistory(ctx context.Context, st *state.State, key,
 	}
 }
 
+// usageFrom converts the app-server's report to the persisted shape, or
+// returns nil when the turn reported none.
+func usageFrom(u *appserver.Usage) *state.Usage {
+	if u == nil {
+		return nil
+	}
+	return &state.Usage{Last: usageBreakdown(u.Last), Total: usageBreakdown(u.Total)}
+}
+
+func usageBreakdown(b appserver.UsageBreakdown) state.UsageBreakdown {
+	return state.UsageBreakdown{
+		Input: b.Input, Cached: b.Cached, CacheWrite: b.CacheWrite,
+		Output: b.Output, Reasoning: b.Reasoning, Total: b.Total,
+	}
+}
+
 // recordFramingBytes bounds the bytes a history record's fixed fields and
 // JSON framing occupy in the indented state file: the round, two object
 // ids, the field names, indentation at the record's depth, separators,
-// and the history field itself when the last record goes. It is generous
-// on purpose; see historyRecordBytes.
-const recordFramingBytes = 512
+// and the history field itself when the last record goes, including the
+// usage object's twelve counters and their field names. It is generous on
+// purpose; see historyRecordBytes.
+const recordFramingBytes = 1024
 
 // historyRecordBytes is an upper bound on the bytes removed from the
 // encoded state file by evicting r: the review as JSON (escaping counted)

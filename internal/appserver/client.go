@@ -133,6 +133,24 @@ type Thread struct {
 	ReasoningEffort string
 }
 
+// Usage is the token usage the app-server reported for a turn. Last is its
+// most recent report and Total is cumulative for the thread. Both are
+// carried because the schema documents neither's scope.
+type Usage struct {
+	Last  UsageBreakdown
+	Total UsageBreakdown
+}
+
+// UsageBreakdown is one set of token counters.
+type UsageBreakdown struct {
+	Input      int64
+	Cached     int64
+	CacheWrite int64
+	Output     int64
+	Reasoning  int64
+	Total      int64
+}
+
 // Review is a completed review turn.
 type Review struct {
 	TurnID string
@@ -141,6 +159,9 @@ type Review struct {
 	Text string
 	// Warnings lists declined server requests observed during the turn.
 	Warnings []string
+	// Usage is the last usage the app-server reported for the turn, or nil
+	// when it reported none.
+	Usage *Usage
 }
 
 // Start launches the app-server and completes the initialize handshake. ctx
@@ -388,7 +409,7 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		if err != nil {
 			return nil, err
 		}
-		return &Review{TurnID: resp.Turn.ID, Text: text, Warnings: warnings}, nil
+		return &Review{TurnID: resp.Turn.ID, Text: text, Warnings: warnings, Usage: final.usage}, nil
 	case turnStatusFailed:
 		return nil, fmt.Errorf("%w: %s", ErrTurnFailed, final.errorMessage())
 	case turnStatusInterrupted:
@@ -469,8 +490,21 @@ type turnWatcher struct {
 	status   string
 	turnErr  *turnError
 	lastErr  *turnError
+	usage    *Usage
 	done     chan struct{}
 	finished bool
+}
+
+// breakdown converts the wire counters to the exported shape.
+func breakdown(b usageBreakdown) UsageBreakdown {
+	return UsageBreakdown{
+		Input:      b.InputTokens,
+		Cached:     b.CachedInputTokens,
+		CacheWrite: b.CacheWriteInputTokens,
+		Output:     b.OutputTokens,
+		Reasoning:  b.ReasoningOutputTokens,
+		Total:      b.TotalTokens,
+	}
 }
 
 func newTurnWatcher(threadID string) *turnWatcher {
@@ -535,6 +569,13 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 			}
 			w.append(&w.messages, n.Item.Text)
 		}
+	case notifyTokenUsage:
+		var n tokenUsageNotification
+		if unmarshal(params, &n) && w.matches(n.ThreadID, n.TurnID) {
+			// The app-server may report several times in a turn; the
+			// last report is the turn's standing figure.
+			w.usage = &Usage{Last: breakdown(n.Usage.Last), Total: breakdown(n.Usage.Total)}
+		}
 	case notifyError:
 		var n errorNotification
 		if unmarshal(params, &n) && w.matches(n.ThreadID, n.TurnID) && !n.WillRetry {
@@ -580,6 +621,7 @@ type turnResult struct {
 	overflow bool
 	turnErr  *turnError
 	lastErr  *turnError
+	usage    *Usage
 }
 
 func (w *turnWatcher) result() turnResult {
@@ -593,6 +635,7 @@ func (w *turnWatcher) result() turnResult {
 		overflow: w.overflow,
 		turnErr:  w.turnErr,
 		lastErr:  w.lastErr,
+		usage:    w.usage,
 	}
 }
 

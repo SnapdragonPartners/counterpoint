@@ -59,6 +59,7 @@ const (
 	notifyTurnStarted       = "turn/started"
 	notifyTurnCompleted     = "turn/completed"
 	notifyItemCompleted     = "item/completed"
+	notifyTokenUsage        = "thread/tokenUsage/updated"
 	notifyAgentMessageDelta = "item/agentMessage/delta"
 	notifyError             = "error"
 
@@ -213,6 +214,29 @@ type agentMessageDelta struct {
 	ThreadID string `json:"threadId"`
 	TurnID   string `json:"turnId"`
 	Delta    string `json:"delta"`
+}
+
+// tokenUsageNotification reports the thread's token usage during a turn.
+// Last is the app-server's most recent report and Total is cumulative for
+// the thread; the schema documents neither's scope, so both are carried
+// through and the interpretation is recorded in docs/SPEC.md.
+type tokenUsageNotification struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+	Usage    struct {
+		Last  usageBreakdown `json:"last"`
+		Total usageBreakdown `json:"total"`
+	} `json:"tokenUsage"`
+}
+
+// usageBreakdown is TokenUsageBreakdown from the app-server schema.
+type usageBreakdown struct {
+	InputTokens           int64 `json:"inputTokens"`
+	CachedInputTokens     int64 `json:"cachedInputTokens"`
+	CacheWriteInputTokens int64 `json:"cacheWriteInputTokens"`
+	OutputTokens          int64 `json:"outputTokens"`
+	ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+	TotalTokens           int64 `json:"totalTokens"`
 }
 
 type errorNotification struct {
