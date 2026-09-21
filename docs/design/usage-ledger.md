@@ -170,130 +170,136 @@ total as reported, and per-round spend where consecutive snapshots survive.
 The output states that it counts completed rounds only, so the figure is
 never mistaken for the whole bill.
 
-## Amendment, 2026-09-21: nothing was recorded against real Codex
+## Outcome, 2026-09-21: unavailable on the inline review path
 
-The first live round after installing recorded no usage at all. The logs
-ruled out the obvious causes: the new binary was running, no report was
-refused as malformed, and `dispatch` passes every notification to every
-subscriber. The method string is present in `codex-cli 0.153.1`, so the
-server can emit it.
+This section replaces two earlier amendments that recorded hypotheses as
+they were tested. Those hypotheses are in the Git history; what a reader
+needs is the established cause, the limitation, the response, and the
+condition for reopening.
 
-A cause was found in this code, and it is a real defect whether or not it
-is *the* live cause. `turnWatcher.handle` dropped every notification once
-`turn/completed` set `finished`, and `Review` returned as soon as the turn
-finished, so a report arriving at or after the completion was discarded
-either way.
-
-The tests did not catch it because the fake reported usage *before* the
-completion. That ordering was my assumption, encoded into the fake and then
-verified against itself. Moving the fake's report to after the completion
-reproduces the live symptom.
-
-What that does **not** establish is what happened in the live run. It shows
-a report arriving after completion would have been dropped; it does not
-show that one arrived. The app-server documentation names both events and
-guarantees no ordering between them, so "usage is reported after the
-completion" is an assumption, not a fact. Only an instrumented live round
-can trace a received event through to a persisted figure, and the counters
-below exist to make that round conclusive rather than another explanation
-resting on a revised fake.
-
-The fix keeps accepting usage for a finished turn, which no other
-notification may revise, and holds the window open for `UsageGrace` after
-the completion. The whole window is waited out rather than returning on the
-first report, since a turn may report more than once and the last one
-stands; returning early took a superseded figure, which the
-`usage-superseded` scenario caught.
-
-`UsageGrace` is a heuristic, not a protocol bound, and the tests now pin it:
-the `usage-late` scenario reports 150 ms after the completion, and setting
-the window to zero fails it. Without that scenario the window was not
-load-bearing in any test, so the first version of this fix had a core
-mechanism no test could fail for.
-
-## Amendment, 2026-09-21: the delegate's usage never reaches the parent
-
-An authorized live review, then a source trace, settled it — against my
-hypothesis and against my proposed alternative.
+### Established cause
 
 `review/start` does not run the model work on the parent thread. It spawns
-a review delegate session, and in `rust-v0.153.1` the delegate's
-`forward_events` discards `EventMsg::TokenCount` along with several
-session and startup events before forwarding the rest to the parent. The
+a review delegate session, and in pinned `rust-v0.153.1` the delegate's
+`forward_events` discards `EventMsg::TokenCount` along with several session
+and startup events before forwarding the rest to the parent. The
 app-server's `handle_token_count_event` is what turns a `TokenCount` into
-`thread/tokenUsage/updated`, and it never sees the delegate's. The usage is
-produced and recorded; it is filtered out one layer below the protocol.
+`thread/tokenUsage/updated`, and it never receives the review's. The usage
+is produced and recorded; it is filtered out one layer below the protocol.
 
-The live run matches the mechanism exactly. The review completed in about
-144 s with a substantive verdict. The observer saw no
-`thread/tokenUsage/updated` for any id, including 2.58 s after completion,
-and Counterpoint's own receipt counters recorded zero. The delegate's
-rollout holds 18 `token_usage_record` and 18 `token_count` entries; the
-parent's holds none. The delegate's session metadata names the parent and
-`{"subagent":"review"}`. Its final cumulative figures were 826,307 input
-tokens of which 772,736 cached, 3,380 output, 829,687 total — reported
-counters, not a billing measurement.
+- `codex-rs/core/src/codex_delegate.rs`, `forward_events`
+- `codex-rs/core/src/tasks/review.rs`, `ReviewTask` and `process_review_events`
+- `codex-rs/app-server/src/bespoke_event_handling.rs`, `handle_token_count_event`
 
-Parent `01a0c5bb-206c-7f51-9061-98467a5177a2`, delegate
-`01a0c5bb-22cc-7843-b1f3-c8c05a74ac50`, Codex Desktop/0.153.1,
-`gpt-6-astra`, high effort. The same `TokenCount` exclusion is present in
-the `0.155.1` source, so an upgrade is not a demonstrated fix.
+The same exclusion is present in the `0.155.1` source, so upgrading is not
+a demonstrated fix.
 
-Neither the attribution filter nor the grace window explains any of this;
-nothing arrived to filter or to wait for. The earlier claim in this record
-that late delivery was the live cause was wrong and is withdrawn.
+### Evidence
 
-### What this does not establish
+One authorized live review, 2026-09-21, Codex Desktop/0.153.1,
+`gpt-6-astra`, high effort. It completed in about 144 s with a substantive
+verdict.
 
-**That the pull-based query is closed.** `account/usage/read` returned
-`threadUsage: null`, which the pinned source maps from a backend 403 or
-404, and an earlier draft of this record called that a dead end. The probe
-asked about the *parent*. The model work and the recorded usage belong to
-the delegate, which was never queried. The suppressed status is unknown.
-The two observations stay separate until evidence connects them.
+| observation | result |
+| --- | --- |
+| `thread/tokenUsage/updated` on the stream, any id, incl. 2.58 s after completion | none |
+| Counterpoint's own receipt counters | zero received, refused, misattributed |
+| delegate rollout `token_usage_record` entries | 18 |
+| parent rollout usage records | 0 |
 
-**That every review on this version lacks usage.** The finding is scoped to
-the inline review path on the versions inspected.
+Parent `01a0c5bb-206c-7f51-9061-98467a5177a2`; delegate
+`01a0c5bb-22cc-7843-b1f3-c8c05a74ac50`, whose session metadata names that
+parent and `{"subagent":"review"}`. The delegate's `turn_token_usage` for
+the round: 826,307 input of which 772,736 cached, 3,380 output, 1,431
+reasoning, 829,687 total. Those are reported token counters, not a cost
+measurement, and one round is not a basis for conclusions about spend.
 
-**That detached review is a workaround.** It is a different implementation
-with its own thread management, and it is plausible but unvalidated. It is
-not a Counterpoint setting: a review is required to run on the workflow's
-persistent thread, so detached delivery would have to answer child thread
-and turn attribution, effective model and sandbox, cancellation and
-cleanup, result collection, and persistence across rounds. That is a scoped
-design, not a field. Scraping rollout files is not an alternative either.
+### Read-only probes, and exactly what they showed
 
-### What follows for this design
+Four requests against a fresh app-server, no thread resumed and no turn
+started:
 
-The mechanism is dormant on this path, and reporting "not recorded" is the
-feature's actual behaviour there. It is retained rather than reverted
-because the silence is upstream, and because a round of unknown cost
-reported as zero would be worse than one reported as unknown. The remaining
-work is an upstream report, not more code here.
+| request | result |
+| --- | --- |
+| `account/usage/read` `{threadId: <delegate>}` | `threadUsage: null` |
+| `account/usage/read` `{threadId: <parent>}` | `threadUsage: null` |
+| `account/usage/read` no params | works: `lifetimeTokens`, six `dailyUsageBuckets` |
+| `thread/read` `{threadId: <delegate>}` | works, returns `parentThreadId` |
+| `thread/list` `{pageSize: 50}` | 25 threads, none carrying `parentThreadId` |
 
-The late-notification accommodation and the grace window are retained too,
-on a narrower justification than the one they were written with. They are
-not there because reports arrive after completion; nothing has ever been
-observed to arrive at all. They are there because the app-server
-documentation guarantees no ordering between the two events, and a
-half-second on a call that takes minutes is a cheaper way to be robust to
-both orderings than a fake that picks one and a client that believes it.
-That was the original defect in this feature, and it is the reason the
-scenarios now cover before, after, late, superseded, and absent.
+The pinned source maps a backend 403 or 404 to `threadUsage: null`, so the
+per-thread query fails for the delegate as well as the parent, and asking
+about the wrong id was not the reason.
 
-Usage notifications are counted on receipt, before any filtering, and the
-count is logged with the refusal and misattribution counts beside it. The
-line says no usable report was observed before the cutoff rather than that
-the server reported none, because the second is a claim about the server
-that nothing here supports.
+**The `thread/list` result does not establish that delegate discovery is
+impossible.** That probe used default parameters: it requested no
+subagent or review source filter and did not paginate beyond the first
+page. It shows only that sub-agent threads did not appear in a default
+first page. Anyone reopening this should not cite it as proof.
 
-A first version of these diagnostics counted `item/completed` notifications
-as usage reports. The guard being edited appears in both handlers and the
-edit replaced every occurrence, so the `no-usage` scenario logged usage
-reports for a turn that sent none: a diagnostic that manufactured the
-evidence it existed to gather. Both reviewers found it. The scenario now
-asserts that no usage notification means no usage counted, and that a
-filtered report is still counted as received.
+### Response
+
+Park the feature. The ledger and `--usage` stay on `main` and stay capable
+of recording a valid report; on the inline review path they report `not
+recorded`, because a round of unknown cost displayed as a round that cost
+nothing would be worse.
+
+Two alternatives were considered and declined. A reader for Codex's
+on-disk rollouts would give per-round accuracy — the records carry the
+parent's id as `session_id` and group a round by `root_turn_id`, so
+discovery would not even need the delegate id — but it takes an ongoing
+compatibility burden on an undocumented private format, and it inverts the
+property that Counterpoint learns about reviews only through the protocol.
+Account-wide daily buckets work and are protocol-only, but they answer a
+different question: what an account spent in a day, never what a round
+cost. Neither is needed to keep reviews working.
+
+The client-side work is retained on its own merits: usage accepted at or
+after a turn's completion without letting any other notification revise
+terminal state, the bounded grace window, and diagnostics that distinguish
+absent from malformed from misattributed. The scenarios covering before,
+after, late, superseded, absent, and unrelated notifications protect real
+client behaviour whatever Codex does.
+
+### Reopening condition
+
+A supported Codex path exposes review usage with reliable round
+attribution. At that point, test the retained client against it rather than
+rebuilding: the handling, the validation, and the scenarios are already in
+place, and what is missing is only the channel.
+
+### Upstream report
+
+To be filed against `openai/codex`, keeping the two observations separate
+since no evidence connects them:
+
+> **Inline review usage never reaches the parent thread**
+>
+> On `codex-cli 0.153.1` (Codex Desktop/0.153.1, `gpt-6-astra`, high
+> effort), an app-server client that runs `review/start` and listens for
+> `thread/tokenUsage/updated` receives nothing, although the review
+> completes normally and produces a verdict.
+>
+> `review/start` spawns a review delegate session; `forward_events` in
+> `codex-rs/core/src/codex_delegate.rs` discards `EventMsg::TokenCount`
+> before forwarding the delegate's remaining events to the parent, and
+> `handle_token_count_event` in
+> `codex-rs/app-server/src/bespoke_event_handling.rs` is what emits the
+> notification. The same exclusion is present in `0.155.1`.
+>
+> Observed on 2026-09-21: no notification on the stream for any id,
+> including 2.58 s after completion; the delegate's rollout holds 18
+> `token_usage_record` entries and the parent's holds none.
+>
+> Separately, `account/usage/read` returns `threadUsage: null` for both
+> the parent and the delegate, which the pinned source maps from a
+> backend 403 or 404; the suppressed status is unknown. Whether that
+> shares a cause with the filtering is not established.
+>
+> A fix would need to expose review usage with correct thread and turn
+> attribution. Simply removing `TokenCount` from the delegate drop-list
+> looks insufficient: the delegate's totals must not overwrite or be
+> double-counted into the parent's cumulative totals.
 
 ## Rejected alternatives
 

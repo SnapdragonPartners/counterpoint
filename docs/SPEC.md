@@ -709,19 +709,20 @@ It is kept rather than removed because the absence is the app-server's, not
 Counterpoint's, and a round whose cost is unknown must not be reported as a
 round that cost nothing.
 
-A pull-based alternative is not ruled out. `account/usage/read` for the
-**parent** thread returned `threadUsage: null` nine minutes after that
-review, which the pinned source maps from a backend 403 or 404. The model
-work and its recorded usage belong to the delegate, which was never
-queried, so that result does not establish that the query cannot work, only
-that it did not for the id that was asked about. The suppressed status is
-unknown, and the notification filtering and the query failure stay separate
-observations until evidence connects them.
+The pull-based alternative was tested and does not work either.
+`account/usage/read` returns `threadUsage: null` for the delegate as well
+as for the parent, which the pinned source maps from a backend 403 or 404;
+the suppressed status is unknown, and whether it shares a cause with the
+filtering is not established. The account-wide form of the same request
+does work, but it reports what an account spent in a day and never what a
+round cost.
 
-Detached review is a different implementation with its own thread
-management and is a plausible but unvalidated workaround; it is not a
-setting Counterpoint can flip, because a review is required to run on the
-workflow's persistent thread.
+The feature is therefore parked rather than extended. It reopens when a
+supported Codex path exposes review usage with reliable round attribution;
+the client handling, validation, and scenarios are already in place, so
+what is missing is only the channel. Reading Codex's on-disk rollouts and
+switching to detached review were both considered and declined, for the
+reasons in `docs/design/usage-ledger.md`.
 
 The report, when it arrives, is `thread/tokenUsage/updated`, carrying a
 `last` breakdown and a `total` one; both are kept, in `last_usage` on the workflow
