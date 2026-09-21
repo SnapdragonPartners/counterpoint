@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,9 +29,11 @@ const (
 	// idle timeout so Counterpoint fails first with a clear error.
 	Timeout = 20 * time.Minute
 
-	// ReasoningEffort is the fixed reviewer effort, passed to
-	// the app-server as a configuration override.
-	ReasoningEffort = "xhigh"
+	// DefaultReasoningEffort is the reviewer's effort when configuration
+	// does not select one, passed to the app-server as a configuration
+	// override so the reviewer runs at a deliberate level regardless of
+	// the user's interactive setting.
+	DefaultReasoningEffort = "high"
 
 	// SetupTimeout bounds everything before the review turn: launching the
 	// app-server, its initialize handshake, and thread start or resume.
@@ -41,6 +44,23 @@ const (
 	// input carried into the prompt and the persisted state.
 	MaxBranchNotesBytes = 1 << 20
 )
+
+// acceptedEfforts is what configuration may select, in ascending order.
+// The ceiling is deliberate rather than an artifact of the catalog: some
+// models advertise levels above xhigh, including one that enables automatic
+// delegation a reviewer should not adopt implicitly. Raising the ceiling is
+// a policy decision, not a configuration change.
+var acceptedEfforts = [...]string{"low", "medium", "high", "xhigh"} //nolint:gochecknoglobals // constant table
+
+// EffortAccepted reports whether s is an effort configuration may select.
+func EffortAccepted(s string) bool {
+	return slices.Contains(acceptedEfforts[:], s)
+}
+
+// AcceptedEfforts returns the accepted efforts, for error messages.
+func AcceptedEfforts() []string {
+	return acceptedEfforts[:]
+}
 
 // Sentinel errors.
 var (
@@ -139,10 +159,14 @@ type Options struct {
 	// NewReviewer starts an app-server session for one review. extraArgs
 	// are configuration overrides for that session, such as the sandbox
 	// settings of a build-capable review. When nil, DefaultReviewer with
-	// the codex executable is used.
+	// the codex executable and ReasoningEffort is used.
 	NewReviewer func(ctx context.Context, extraArgs []string) (Reviewer, error)
 	Logger      *slog.Logger
 	Version     string
+	// ReasoningEffort is the reviewer's effort; DefaultReasoningEffort
+	// when empty. The caller validates it with EffortAccepted before
+	// constructing the Service.
+	ReasoningEffort string
 	// CheckoutRoot is the scratch root for build-capable reviews;
 	// scratch.DefaultRoot when empty.
 	CheckoutRoot string
@@ -156,6 +180,7 @@ type Service struct {
 	timeout      time.Duration
 	setupTimeout time.Duration
 	checkoutRoot string
+	effort       string
 	// recordBytes estimates a history record's encoded size for eviction
 	// under size pressure; historyRecordBytes unless a test overrides it.
 	recordBytes func(state.HistoryRecord) int
@@ -167,20 +192,25 @@ func New(opts Options) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = DefaultReasoningEffort
+	}
 	nr := opts.NewReviewer
 	if nr == nil {
-		nr = DefaultReviewer(opts.Version, log)
+		nr = DefaultReviewer(opts.Version, effort, log)
 	}
-	return &Service{store: opts.Store, newReviewer: nr, log: log, timeout: Timeout, setupTimeout: SetupTimeout, checkoutRoot: opts.CheckoutRoot, recordBytes: historyRecordBytes}
+	return &Service{store: opts.Store, newReviewer: nr, log: log, timeout: Timeout, setupTimeout: SetupTimeout,
+		checkoutRoot: opts.CheckoutRoot, effort: effort, recordBytes: historyRecordBytes}
 }
 
-// DefaultReviewer starts codex app-server with the fixed reasoning effort
-// and the session's extra configuration overrides. The handshake is bounded
-// by the setup context the service passes; the process lifetime is owned by
-// the client's Close.
-func DefaultReviewer(version string, log *slog.Logger) func(ctx context.Context, extraArgs []string) (Reviewer, error) {
+// DefaultReviewer starts codex app-server with the configured reasoning
+// effort and the session's extra configuration overrides. The handshake is
+// bounded by the setup context the service passes; the process lifetime is
+// owned by the client's Close.
+func DefaultReviewer(version, effort string, log *slog.Logger) func(ctx context.Context, extraArgs []string) (Reviewer, error) {
 	return func(ctx context.Context, extraArgs []string) (Reviewer, error) {
-		args := append(appserver.DefaultArgs(), "-c", fmt.Sprintf("model_reasoning_effort=%q", ReasoningEffort))
+		args := append(appserver.DefaultArgs(), "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
 		args = append(args, extraArgs...)
 		return appserver.Start(ctx, appserver.Options{
 			Command: appserver.DefaultCommand,
@@ -422,7 +452,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 	// (issue #7), so an empty reported_effort means "not reported", not
 	// "no effort".
 	s.log.Info("review turn starting", "request", requestID, "workflow", key, "round", round, "thread", abbreviate(thread.ID),
-		"model", thread.Model, "effort", ReasoningEffort, "reported_effort", thread.ReasoningEffort,
+		"model", thread.Model, "effort", s.effort, "reported_effort", thread.ReasoningEffort,
 		"commit", target.Commit, "base", target.Base, "build", req.Build)
 
 	turnCtx, cancel := context.WithTimeoutCause(ctx, s.timeout, ErrTimeout)

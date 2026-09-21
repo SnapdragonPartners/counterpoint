@@ -204,6 +204,24 @@ directory in a `counterpoint` subdirectory; `COUNTERPOINT_STATE_FILE`
 overrides the path for tests and unusual installations. Diagnostics go to
 stderr only.
 
+An optional configuration file sits beside the state file at
+`config.json`, or at `COUNTERPOINT_CONFIG_FILE`:
+
+```json
+{
+  "review_effort": "high",
+  "state_file": "/absolute/path/state.json",
+  "checkout_dir": "/absolute/path/checkouts"
+}
+```
+
+`review_effort` is one of `low`, `medium`, `high`, or `xhigh` and defaults to
+`high`; lower it to spend less model capacity per round, raise it when a
+change warrants a deeper read. Environment variables win over the file, which
+wins over the built-in defaults. A missing file means the defaults; a file
+that exists is validated at startup, so a typo fails before a review rather
+than during one. `docs/SPEC.md` has the full contract.
+
 With `build: true` the reviewer gets a disposable checkout of the commit under
 the user cache directory (`counterpoint/checkouts`, or
 `COUNTERPOINT_CHECKOUT_DIR`) and may build and run tests there, offline. The
@@ -259,7 +277,7 @@ before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
   open it there again. Opening the thread in the app while a review runs
   fails on the app side.
 - The "review turn starting" log line reports `effort`, the configured
-  override in force, alongside `reported_effort`, the value the app-server
+  level in force, alongside `reported_effort`, the value the app-server
   echoed back. After a resume the app-server may omit that value, so an empty
   `reported_effort` means it was not reported, not that no effort applied.
 

@@ -52,14 +52,22 @@ var (
 	ErrUnexpectedSymlink      = errors.New("scratch path component is a symlink")
 )
 
-// DefaultRoot returns the scratch root: EnvRoot when set, otherwise the
-// Counterpoint subdirectory of the user cache directory.
-func DefaultRoot() (string, error) {
+// ResolveRoot returns the scratch root. Precedence is EnvRoot, then
+// configured, the value the configuration file supplied, then the
+// Counterpoint subdirectory of the user cache directory. An empty
+// configured value means the file did not set one.
+func ResolveRoot(configured string) (string, error) {
 	if p := os.Getenv(EnvRoot); p != "" {
 		if !filepath.IsAbs(p) {
 			return "", fmt.Errorf("%s must be an absolute path, got %q", EnvRoot, p)
 		}
 		return p, nil
+	}
+	if configured != "" {
+		if !filepath.IsAbs(configured) {
+			return "", fmt.Errorf("configured checkout directory must be an absolute path, got %q", configured)
+		}
+		return configured, nil
 	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
@@ -70,7 +78,7 @@ func DefaultRoot() (string, error) {
 
 // Options describes the checkout to prepare.
 type Options struct {
-	// Root is the scratch root; DefaultRoot when empty.
+	// Root is the scratch root; ResolveRoot("") when empty.
 	Root string
 	// WorkflowKey names the workflow; it selects the directory.
 	WorkflowKey string
@@ -110,7 +118,7 @@ type Checkout struct {
 func Prepare(ctx context.Context, opts Options) (co *Checkout, err error) {
 	root := opts.Root
 	if root == "" {
-		if root, err = DefaultRoot(); err != nil {
+		if root, err = ResolveRoot(""); err != nil {
 			return nil, err
 		}
 	}

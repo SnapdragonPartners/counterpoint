@@ -296,25 +296,37 @@ func TestReplay(t *testing.T) {
 	}
 }
 
-func TestDefaultPath(t *testing.T) {
+func TestResolvePath(t *testing.T) {
+	// The environment wins over a configured value.
 	t.Setenv(EnvStatePath, "/abs/state.json")
-	p, err := DefaultPath()
+	p, err := ResolvePath("/from/config.json")
 	if err != nil || p != "/abs/state.json" {
-		t.Errorf("DefaultPath with override = %q, %v", p, err)
+		t.Errorf("ResolvePath with override = %q, %v", p, err)
 	}
 
 	t.Setenv(EnvStatePath, "relative/state.json")
-	if _, err := DefaultPath(); err == nil {
-		t.Error("DefaultPath accepted a relative override")
+	if _, err := ResolvePath(""); err == nil {
+		t.Error("ResolvePath accepted a relative override")
 	}
 
+	// With no environment override, the configured value is used.
 	t.Setenv(EnvStatePath, "")
-	p, err = DefaultPath()
+	p, err = ResolvePath("/from/config.json")
+	if err != nil || p != "/from/config.json" {
+		t.Errorf("ResolvePath with configured value = %q, %v", p, err)
+	}
+
+	if _, err := ResolvePath("relative/config.json"); err == nil {
+		t.Error("ResolvePath accepted a relative configured value")
+	}
+
+	// With neither, the built-in default.
+	p, err = ResolvePath("")
 	if err != nil {
-		t.Fatalf("DefaultPath: %v", err)
+		t.Fatalf("ResolvePath: %v", err)
 	}
 	if !filepath.IsAbs(p) || filepath.Base(p) != stateFileName || filepath.Base(filepath.Dir(p)) != configSubdir {
-		t.Errorf("DefaultPath = %q, want <config>/%s/%s", p, configSubdir, stateFileName)
+		t.Errorf("ResolvePath = %q, want <config>/%s/%s", p, configSubdir, stateFileName)
 	}
 }
 

@@ -12,8 +12,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/SnapdragonPartners/counterpoint/internal/config"
 	"github.com/SnapdragonPartners/counterpoint/internal/mcpserver"
 	"github.com/SnapdragonPartners/counterpoint/internal/review"
+	"github.com/SnapdragonPartners/counterpoint/internal/scratch"
 	"github.com/SnapdragonPartners/counterpoint/internal/state"
 )
 
@@ -56,12 +58,31 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout io.Writ
 	}
 
 	log := slog.New(slog.NewTextHandler(stderr, nil))
-	statePath, err := state.DefaultPath()
+	// Configuration is loaded and validated before anything else starts,
+	// so a bad value fails here rather than part-way through a review.
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	svc := review.New(review.Options{Store: state.NewStore(statePath), Logger: log, Version: version})
-	log.Info("counterpoint serving MCP on stdio", "version", version, "state", statePath)
+	statePath, err := state.ResolvePath(cfg.StateFile)
+	if err != nil {
+		return err
+	}
+	checkoutRoot, err := scratch.ResolveRoot(cfg.CheckoutDir)
+	if err != nil {
+		return err
+	}
+	svc := review.New(review.Options{
+		Store:           state.NewStore(statePath),
+		Logger:          log,
+		Version:         version,
+		CheckoutRoot:    checkoutRoot,
+		ReasoningEffort: cfg.ReviewEffort,
+	})
+	// configFile is empty when no file exists, which is the normal case
+	// and not a warning; it names the source of a surprising setting.
+	log.Info("counterpoint serving MCP on stdio", "version", version, "state", statePath,
+		"checkouts", checkoutRoot, "effort", cfg.ReviewEffort, "config_file", cfg.Path)
 	return mcpserver.Serve(ctx, mcpserver.New(ctx, svc, version, log), stdin, nopCloser{stdout})
 }
 

@@ -667,8 +667,8 @@ func TestResumedRoundLogsConfiguredEffortWhenUnreported(t *testing.T) {
 	if starting == "" {
 		t.Fatalf("no round-two start line in logs:\n%s", logs.String())
 	}
-	if !strings.Contains(starting, "effort="+ReasoningEffort+" ") {
-		t.Errorf("configured effort %q missing from: %s", ReasoningEffort, starting)
+	if !strings.Contains(starting, "effort="+DefaultReasoningEffort+" ") {
+		t.Errorf("configured effort %q missing from: %s", DefaultReasoningEffort, starting)
 	}
 	if !strings.Contains(starting, `reported_effort="" `) {
 		t.Errorf("omitted effort not labelled as unreported in: %s", starting)
@@ -1803,5 +1803,34 @@ func TestHistoryEvictionStopsAsSoonAsTheEstimateCoversTheOvershoot(t *testing.T)
 	}
 	if len(a.History) != 0 {
 		t.Errorf("tie broken wrongly: w-a should be evicted before w-b, got a=%d b=%d", len(a.History), len(b.History))
+	}
+}
+
+func TestEffortAccepted(t *testing.T) {
+	for _, ok := range []string{"low", "medium", "high", "xhigh"} {
+		if !EffortAccepted(ok) {
+			t.Errorf("EffortAccepted(%q) = false, want true", ok)
+		}
+	}
+	// The ceiling exists because levels above xhigh on some models enable
+	// automatic delegation a reviewer should not adopt implicitly.
+	for _, bad := range []string{"max", "ultra", "XHIGH", "", "none", "minimal"} {
+		if EffortAccepted(bad) {
+			t.Errorf("EffortAccepted(%q) = true, want false", bad)
+		}
+	}
+	if len(AcceptedEfforts()) != 4 {
+		t.Errorf("AcceptedEfforts() = %v, want four levels", AcceptedEfforts())
+	}
+}
+
+func TestNewUsesTheConfiguredEffort(t *testing.T) {
+	svc := New(Options{Store: state.NewStore(filepath.Join(t.TempDir(), "state.json")), ReasoningEffort: "low"})
+	if svc.effort != "low" {
+		t.Errorf("effort = %q, want low", svc.effort)
+	}
+	svc = New(Options{Store: state.NewStore(filepath.Join(t.TempDir(), "state.json"))})
+	if svc.effort != DefaultReasoningEffort {
+		t.Errorf("effort with no option = %q, want %q", svc.effort, DefaultReasoningEffort)
 	}
 }

@@ -140,14 +140,22 @@ func (s *State) Replay(key, hash string) (Workflow, bool) {
 	return w, true
 }
 
-// DefaultPath returns the state file path: EnvStatePath when set, otherwise
-// the Counterpoint subdirectory of the user configuration directory.
-func DefaultPath() (string, error) {
+// ResolvePath returns the state file path. Precedence is EnvStatePath,
+// then configured, the value the configuration file supplied, then the
+// Counterpoint subdirectory of the user configuration directory. An empty
+// configured value means the file did not set one.
+func ResolvePath(configured string) (string, error) {
 	if p := os.Getenv(EnvStatePath); p != "" {
 		if !filepath.IsAbs(p) {
 			return "", fmt.Errorf("%s must be an absolute path, got %q", EnvStatePath, p)
 		}
 		return p, nil
+	}
+	if configured != "" {
+		if !filepath.IsAbs(configured) {
+			return "", fmt.Errorf("configured state file must be an absolute path, got %q", configured)
+		}
+		return configured, nil
 	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
