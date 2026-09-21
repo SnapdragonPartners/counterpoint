@@ -171,7 +171,17 @@ the author's claims are correct.
 - `docs/SPEC.md` owns product behavior, limits, and what is out of scope.
 - Update documentation in the same change when behavior or a public contract
   changes.
-- Do not claim planned behavior is implemented.
+- Do not claim planned behavior is implemented. When a live observation
+  contradicts a documented claim, correct the document in the same change
+  rather than recording the observation beside it.
+- A narrowed or withdrawn claim is swept from every place it appears, not only
+  the one a reviewer named: code comments, `docs/SPEC.md`, `README.md`, and the
+  design records together. A withdrawn claim left standing next to its
+  replacement reads as corroboration, and the next author cannot tell which
+  one survived.
+- Scope a claim to what was observed. "This version does not report X" and
+  "this path on the versions inspected does not report X" are different
+  statements, and only the second is usually supported.
 - Prefer focused documents over duplicating protocol fields, package inventories,
   or state flows in multiple places.
 - Link consequential decisions to their issue or design document. Record a
@@ -211,11 +221,27 @@ fake app-server subprocess for automated integration coverage.
 - Before implementing parsers, schemas, validators, persistence, or policy
   checks, enumerate accepted invariants and rejected cases.
 - For nontrivial regression tests, temporarily break the protected behavior to
-  prove that the test fails, then restore it before committing.
+  prove that the test fails, then restore it before committing. Copy the file
+  aside first and restore from the copy: `git checkout` on an uncommitted file
+  discards the fix along with the mutation. Three ways this step passes while
+  proving nothing: the assertion sits on a line the mutation does not remove,
+  so deleting the mechanism leaves it green; the suite fails only by panicking,
+  which is not an assertion catching the defect and usually exposes a second
+  one; or the mutation is weaker than the mechanism, so a shorter timeout or a
+  narrower guard still wins the race under test.
+- A test must establish its own preconditions rather than race them. One that
+  cancels on a timer, or acts before the state it needs is observable, can pass
+  by taking a path it does not mean to exercise; assert the precondition, and
+  measure from the act rather than from the setup.
 - State important untestable guarantees beside the implementation. Do not imply
   they are covered merely because neighboring tests pass.
 - Prefer deterministic fakes at process and protocol boundaries. Use real,
   inexpensive components when they provide materially stronger evidence.
+- A fake encodes an assumption about the real system, and a test against it
+  proves only that the code agrees with the assumption. Where the protocol does
+  not guarantee the behavior the change depends on, such as the ordering of two
+  events, make the fake exercise every ordering the protocol permits rather
+  than the one that was assumed.
 
 ## Durable engineering invariants
 
