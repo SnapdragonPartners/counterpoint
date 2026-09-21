@@ -305,11 +305,14 @@ the whole turn, so treat these as reported figures and the sum as a lower
 bound, not as measured round costs.
 ```
 
-**On `codex-cli 0.153.1` every round reports `not recorded`**, because that
-version sends no token usage for a review and its per-thread usage query
-returns nothing for it. The command and the ledger are in place for an
-app-server that does report; a round whose cost is unknown is shown as
-unknown rather than as free. `docs/SPEC.md` records the evidence.
+**Rounds reviewed through `codex-cli 0.153.1` report `not recorded`.** That
+version runs an inline review in a separate delegate session and drops the
+delegate's token-count events before they reach the parent thread, so the
+usage never appears on the protocol stream Counterpoint listens to. The
+same exclusion is in `0.155.1`. The command and the ledger are in place for
+an app-server that does report; a round whose cost is unknown is shown as
+unknown rather than as free. `docs/SPEC.md` records the evidence and the
+limits of it.
 
 It counts completed rounds only, so a review that failed or timed out is
 missing from the totals, and usage is discarded when the ledger record it

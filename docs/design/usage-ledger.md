@@ -211,28 +211,65 @@ the window to zero fails it. Without that scenario the window was not
 load-bearing in any test, so the first version of this fix had a core
 mechanism no test could fail for.
 
-## Amendment, 2026-09-21: the channel is silent on this version
+## Amendment, 2026-09-21: the delegate's usage never reaches the parent
 
-An authorized live review settled it, against the hypothesis above. No
-`thread/tokenUsage/updated` appeared anywhere on the app-server stream
-during the review or for 2.58 s after it completed, and the candidate's own
-counters recorded zero reports received. Neither the attribution filter nor
-the grace window explains the missing usage, because nothing arrived to
-filter or to wait for.
+An authorized live review, then a source trace, settled it — against my
+hypothesis and against my proposed alternative.
 
-`account/usage/read` with the same thread returned `threadUsage: null`.
-In the pinned `rust-v0.153.1` source that handler queries the backend
-directly, needs no resumed thread, and converts a backend 403 or 404 into
-`null` while a successful response missing the thread produces an error. So
-the null is a suppressed backend refusal, and resuming the thread first is
-not a next hypothesis. That closes the pull-based alternative as well.
+`review/start` does not run the model work on the parent thread. It spawns
+a review delegate session, and in `rust-v0.153.1` the delegate's
+`forward_events` discards `EventMsg::TokenCount` along with several
+session and startup events before forwarding the rest to the parent. The
+app-server's `handle_token_count_event` is what turns a `TokenCount` into
+`thread/tokenUsage/updated`, and it never sees the delegate's. The usage is
+produced and recorded; it is filtered out one layer below the protocol.
 
-Both observations stay separate until a shared cause is shown. What follows
-for this design: the mechanism is dormant on the runtime this repository is
-developed against, and the honest reporting of "not recorded" is the
+The live run matches the mechanism exactly. The review completed in about
+144 s with a substantive verdict. The observer saw no
+`thread/tokenUsage/updated` for any id, including 2.58 s after completion,
+and Counterpoint's own receipt counters recorded zero. The delegate's
+rollout holds 18 `token_usage_record` and 18 `token_count` entries; the
+parent's holds none. The delegate's session metadata names the parent and
+`{"subagent":"review"}`. Its final cumulative figures were 826,307 input
+tokens of which 772,736 cached, 3,380 output, 829,687 total — reported
+counters, not a billing measurement.
+
+Parent `01a0c5bb-206c-7f51-9061-98467a5177a2`, delegate
+`01a0c5bb-22cc-7843-b1f3-c8c05a74ac50`, Codex Desktop/0.153.1,
+`gpt-6-astra`, high effort. The same `TokenCount` exclusion is present in
+the `0.155.1` source, so an upgrade is not a demonstrated fix.
+
+Neither the attribution filter nor the grace window explains any of this;
+nothing arrived to filter or to wait for. The earlier claim in this record
+that late delivery was the live cause was wrong and is withdrawn.
+
+### What this does not establish
+
+**That the pull-based query is closed.** `account/usage/read` returned
+`threadUsage: null`, which the pinned source maps from a backend 403 or
+404, and an earlier draft of this record called that a dead end. The probe
+asked about the *parent*. The model work and the recorded usage belong to
+the delegate, which was never queried. The suppressed status is unknown.
+The two observations stay separate until evidence connects them.
+
+**That every review on this version lacks usage.** The finding is scoped to
+the inline review path on the versions inspected.
+
+**That detached review is a workaround.** It is a different implementation
+with its own thread management, and it is plausible but unvalidated. It is
+not a Counterpoint setting: a review is required to run on the workflow's
+persistent thread, so detached delivery would have to answer child thread
+and turn attribution, effective model and sandbox, cancellation and
+cleanup, result collection, and persistence across rounds. That is a scoped
+design, not a field. Scraping rollout files is not an alternative either.
+
+### What follows for this design
+
+The mechanism is dormant on this path, and reporting "not recorded" is the
 feature's actual behaviour there. It is retained rather than reverted
-because the silence is the app-server's, and because a round of unknown cost
-reported as zero would be worse than one reported as unknown.
+because the silence is upstream, and because a round of unknown cost
+reported as zero would be worse than one reported as unknown. The remaining
+work is an upstream report, not more code here.
 
 The late-notification accommodation and the grace window are retained too,
 on a narrower justification than the one they were written with. They are

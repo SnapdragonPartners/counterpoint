@@ -682,18 +682,46 @@ default.
 ## Token usage
 
 Counterpoint records what the app-server reported for each completed round,
-when it reports anything. **On `codex-cli 0.153.1` it does not.** A live
-review on 2026-09-21 saw no `thread/tokenUsage/updated` on the app-server
-stream at any point, including for 2.58 s after the turn completed, and
-`account/usage/read` for the same thread returned `threadUsage: null`,
-which that version's source produces from a suppressed backend 403 or 404.
-So on the runtime this repository is developed against, `--usage` reports
-`not recorded` for every round, and the machinery below is dormant.
+when it reports anything. **On the inline review path it does not**, and
+the cause is upstream rather than here.
+
+`review/start` runs the model work in a separate review delegate session,
+not on the parent thread. In `codex-cli 0.153.1`, the delegate's event
+forwarding discards `EventMsg::TokenCount` before passing the remaining
+events to the parent, and that event is what the app-server turns into
+`thread/tokenUsage/updated`. The usage exists; it never crosses into the
+parent's protocol stream.
+
+A live review on 2026-09-21 confirmed the mechanism end to end. The review
+completed normally in about 144 s with a substantive verdict, the observer
+saw no `thread/tokenUsage/updated` for any id including 2.58 s after
+completion, and the rollouts show 18 usage records in the delegate and none
+in the parent. The same exclusion is present in the `0.155.1` source, so
+upgrading is not a demonstrated fix.
+
+The scope of that statement matters. It is a property of the inline review
+path on the inspected versions, not of every review, every version, or
+every account. `--usage` therefore reports `not recorded` for rounds taken
+this way, and the machinery below is dormant on that path rather than
+wrong.
 
 It is kept rather than removed because the absence is the app-server's, not
 Counterpoint's, and a round whose cost is unknown must not be reported as a
-round that cost nothing. Whether other versions, model routes, or accounts
-emit the notification is not established.
+round that cost nothing.
+
+A pull-based alternative is not ruled out. `account/usage/read` for the
+**parent** thread returned `threadUsage: null` nine minutes after that
+review, which the pinned source maps from a backend 403 or 404. The model
+work and its recorded usage belong to the delegate, which was never
+queried, so that result does not establish that the query cannot work, only
+that it did not for the id that was asked about. The suppressed status is
+unknown, and the notification filtering and the query failure stay separate
+observations until evidence connects them.
+
+Detached review is a different implementation with its own thread
+management and is a plausible but unvalidated workaround; it is not a
+setting Counterpoint can flip, because a review is required to run on the
+workflow's persistent thread.
 
 The report, when it arrives, is `thread/tokenUsage/updated`, carrying a
 `last` breakdown and a `total` one; both are kept, in `last_usage` on the workflow
