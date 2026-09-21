@@ -3,6 +3,7 @@ package appserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -866,5 +867,131 @@ func TestWorkspaceWriteSessionIsValidatedAgainstTheEchoedPolicy(t *testing.T) {
 	wrong := fakeClientArgs(t, "workspace-wrong-roots", args)
 	if _, err := wrong.StartThread(context.Background(), "/work/tree", build); !errors.Is(err, ErrPolicyMismatch) {
 		t.Errorf("StartThread with an extra root error = %v, want ErrPolicyMismatch", err)
+	}
+}
+
+// Usage is recorded for the turn under review, superseded by a later
+// report, ignored when attributed to another turn, and left nil when the
+// app-server reports none.
+func TestReviewRecordsTokenUsage(t *testing.T) {
+	for _, tc := range []struct {
+		scenario string
+		want     *Usage
+	}{
+		{"", &Usage{
+			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
+			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
+		}},
+		// The second report stands; the first is not added to it.
+		{"usage-superseded", &Usage{
+			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
+			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
+		}},
+		{"usage-other-turn", nil},
+		{"no-usage", nil},
+	} {
+		name := tc.scenario
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			scenario := tc.scenario
+			if scenario == "" {
+				scenario = "normal"
+			}
+			cl, _ := fakeClient(t, scenario, "")
+			th := startThread(t, cl)
+			rev, err := cl.Review(context.Background(), th.ID, "instructions")
+			if err != nil {
+				t.Fatalf("Review: %v", err)
+			}
+			switch {
+			case tc.want == nil && rev.Usage != nil:
+				t.Errorf("Usage = %+v, want nil", rev.Usage)
+			case tc.want != nil && rev.Usage == nil:
+				t.Fatal("Usage = nil, want the reported counters")
+			case tc.want != nil && *rev.Usage != *tc.want:
+				t.Errorf("Usage = %+v, want %+v", *rev.Usage, *tc.want)
+			}
+		})
+	}
+}
+
+// Usage comes from the child process and is untrusted. Anything the
+// schema requires and the message omits must be refused, at every level:
+// recorded zeros would be a cost reported for a turn nobody measured, and
+// a negative counter persisted with the round makes every later round of
+// that workflow fail state validation.
+//
+// complete is a report with every required counter, as the schema defines
+// ThreadTokenUsage and TokenUsageBreakdown.
+const completeUsage = `{"threadId":"t","turnId":"u","tokenUsage":{` +
+	`"last":{"inputTokens":5,"cachedInputTokens":1,"outputTokens":2,"reasoningOutputTokens":1,"totalTokens":5},` +
+	`"total":{"inputTokens":9,"cachedInputTokens":1,"outputTokens":2,"reasoningOutputTokens":1,"totalTokens":9}}}`
+
+func TestMalformedTokenUsageIsRefused(t *testing.T) {
+	counters := func(omit string) string {
+		out := ""
+		for _, c := range []string{"inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"} {
+			if c == omit {
+				continue
+			}
+			if out != "" {
+				out += ","
+			}
+			out += `"` + c + `":1`
+		}
+		return `{"threadId":"t","turnId":"u","tokenUsage":{"last":{` + out + `},"total":{` + out + `}}}`
+	}
+
+	bodies := map[string]string{
+		"no usage object":               `{"threadId":"t","turnId":"u"}`,
+		"null usage":                    `{"threadId":"t","turnId":"u","tokenUsage":null}`,
+		"empty usage":                   `{"threadId":"t","turnId":"u","tokenUsage":{}}`,
+		"null breakdowns":               `{"threadId":"t","turnId":"u","tokenUsage":{"last":null,"total":null}}`,
+		"empty breakdowns":              `{"threadId":"t","turnId":"u","tokenUsage":{"last":{},"total":{}}}`,
+		"negative last":                 `{"threadId":"t","turnId":"u","tokenUsage":{"last":{"inputTokens":-5,"cachedInputTokens":1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1},"total":{"inputTokens":1,"cachedInputTokens":1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1}}}`,
+		"negative total":                `{"threadId":"t","turnId":"u","tokenUsage":{"last":{"inputTokens":1,"cachedInputTokens":1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1},"total":{"inputTokens":1,"cachedInputTokens":-1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1}}}`,
+		"negative optional cache write": `{"threadId":"t","turnId":"u","tokenUsage":{"last":{"inputTokens":1,"cachedInputTokens":1,"cacheWriteInputTokens":-1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1},"total":{"inputTokens":1,"cachedInputTokens":1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1}}}`,
+	}
+	// Each counter the schema marks required must be required here too.
+	for _, c := range []string{"inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"} {
+		bodies["missing "+c] = counters(c)
+	}
+
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			// A valid report lands first, so the refusal is also shown not
+			// to replace a good figure with zeros.
+			w := newTurnWatcher("t")
+			w.setTurn("u")
+			w.handle(notifyTokenUsage, json.RawMessage(completeUsage))
+			w.handle(notifyTokenUsage, json.RawMessage(body))
+			if w.usage == nil || w.usage.Last.Total != 5 || w.usage.Total.Total != 9 {
+				t.Errorf("malformed report replaced the valid one: %+v", w.usage)
+			}
+			if w.badUsage != 1 {
+				t.Errorf("badUsage = %d, want the refusal counted", w.badUsage)
+			}
+		})
+	}
+
+	// A valid report after a refused one still lands: one malformed
+	// message does not poison the turn's reporting.
+	w := newTurnWatcher("t")
+	w.setTurn("u")
+	w.handle(notifyTokenUsage, json.RawMessage(`{"threadId":"t","turnId":"u","tokenUsage":null}`))
+	w.handle(notifyTokenUsage, json.RawMessage(completeUsage))
+	if w.usage == nil || w.usage.Last.Total != 5 {
+		t.Errorf("usage after a refused report = %+v", w.usage)
+	}
+
+	// cacheWriteInputTokens is the one optional counter; absent it is the
+	// schema's documented zero, not a refusal.
+	w = newTurnWatcher("t")
+	w.setTurn("u")
+	w.handle(notifyTokenUsage, json.RawMessage(completeUsage))
+	if w.usage == nil || w.usage.Last.CacheWrite != 0 || w.badUsage != 0 {
+		t.Errorf("absent cacheWriteInputTokens = %+v, badUsage=%d", w.usage, w.badUsage)
 	}
 }

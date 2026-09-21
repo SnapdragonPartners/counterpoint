@@ -262,9 +262,12 @@ a versioned JSON envelope:
       "round": 3,
       "last_review": "the round-three verdict",
       "last_warnings": ["..."],
+      "last_usage": {"last": {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0, "total": 0},
+                     "total": {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0, "total": 0}},
       "history": [
         {"round": 1, "commit": "<id>", "base": "<id>", "omitted": "too-large"},
-        {"round": 2, "commit": "<id>", "base": "<id>", "review": "the round-two verdict"}
+        {"round": 2, "commit": "<id>", "base": "<id>", "review": "the round-two verdict",
+         "usage": {"last": {"...": 0}, "total": {"...": 0}}}
       ]
     }
   }
@@ -671,9 +674,92 @@ control.
 Diagnostics go to stderr so they cannot corrupt the MCP or app-server
 streams. Each review is logged with a request correlation id, workflow key,
 round, abbreviated thread id, turn id, configured and reported model and
-effort, duration, terminal status, warnings count, and any declined
-request. Logs do not include branch notes, model output, credentials, or
-environment dumps by default.
+effort, duration, terminal status, warnings count, the round's token usage
+when the app-server reported any, and any declined request. Logs do not
+include branch notes, model output, credentials, or environment dumps by
+default.
+
+## Token usage
+
+Counterpoint records what the app-server reported for each completed round.
+The report arrives in `thread/tokenUsage/updated`, carrying a `last`
+breakdown and a `total` one; both are kept, in `last_usage` on the workflow
+for the newest round and in `usage` on a history record for a retained
+earlier round. The counters are input, cached input, cache writes, output,
+reasoning output, and the total.
+
+The notification is child-process output and is validated as untrusted
+input before it is accepted, against what the generated schema requires:
+`tokenUsage` present and non-null, `last` and `total` present and non-null
+within it, and, in each breakdown, `inputTokens`, `cachedInputTokens`,
+`outputTokens`, `reasoningOutputTokens`, and `totalTokens` present.
+`cacheWriteInputTokens` is the one counter the schema makes optional, and
+an absent one is its documented zero. No counter may be negative.
+
+A report failing any of these is refused, and an earlier valid report for
+the same turn stands. The two failure modes this prevents are a turn the
+app-server said nothing about being recorded as a turn that cost nothing,
+and a negative counter being persisted, which would make every later round
+of that workflow fail the load-time validation enforcing the same rule,
+leaving it recoverable only by hand-editing the state file. Refusals are
+counted and logged once per turn; they do not affect the verdict and are
+not review warnings. Usage that would not validate is also dropped at the
+point of saving, so no path can write a record the loader will reject.
+
+Only non-negativity is validated. Which counters are subsets of which varies
+by model, so a relationship rule would reject valid files.
+
+Usage is not returned to the calling agent. The review tool's result is the
+reviewer's verdict; usage goes to the log line and to `counterpoint
+--usage`, which loads the state file, prints what is recorded, and exits
+without starting the MCP server. The report is per workflow, newest round
+first, and names the state file it read.
+
+Three limits are deliberate and are stated in the report:
+
+- **Completed rounds only.** A review that failed, timed out, or was
+  interrupted still spent tokens and is not recorded, because persisting a
+  round that produced no verdict cuts against completed-only persistence.
+  The totals are therefore a floor on what was spent.
+- **A mixed set of versions loses it.** The fields are additive and the
+  envelope version is unchanged, so a Counterpoint predating them reads the
+  file without complaint; its next save then rewrites the file without
+  them, for every workflow, because saving re-marshals typed values. Usage
+  survives only while every process using a state file understands it,
+  which is the existing reason to restart sessions after installing a new
+  version.
+- **Usage dies with the records it describes.** A history record evicted
+  under size pressure takes its usage with it, and the newest round's usage
+  is replaced when the next round completes. Anything needing longer life is
+  extracted to storage outside Counterpoint. The workflow's `last_usage`
+  total is the exception in practice: it is cumulative for the thread, so it
+  survives eviction of the per-round detail.
+- **Absent is unknown, not zero.** A round reviewed before usage was
+  tracked, or whose app-server reported none, prints as not recorded.
+
+The app-server schema does not document the scope of either breakdown, and
+no automated test can settle it, because the fake answers whatever it is
+told to. Counterpoint therefore reports what it was given and asserts
+nothing about it:
+
+- A `last` breakdown is shown per round as a last report, never as the
+  round's cost. If a last report covers only the final model request of a
+  turn rather than the whole turn, earlier requests are absent from it.
+- Their sum is shown as a sum of last reports and stated to be a lower
+  bound, never a round-by-round cost.
+- A `total` breakdown is shown as the thread total reported at that round.
+  Counterpoint resumes one thread per workflow across rounds, so if `total`
+  is cumulative for the thread then the newest round's total is the
+  branch's lifetime spend and is the one figure that survives eviction of
+  the per-round detail. That conditional is the claim; the report does not
+  make it for the reader.
+
+One live run would settle both scopes and let the report state a measured
+cost. Until then the labels are the contract.
+
+Tokens are reported, never money. The protocol carries no pricing, and a
+hardcoded rate table would go stale silently and be wrong for any user on a
+different plan.
 
 ## Configuration
 
@@ -754,6 +840,10 @@ configuration file does own is listed under "Configuration".
 | Unused build cache retention | 72 h |
 | Git stdout captured; stderr captured; stderr quoted | 1 MiB; 64 KiB; 512 B |
 | Lock file and scratch directory name | 16 hex characters of SHA-256 |
+
+Non-server modes: `--version` prints the version, `--usage` prints
+recorded token usage (see "Token usage"); both write to stdout and exit
+without starting the MCP transport.
 
 Environment variables Counterpoint reads: `COUNTERPOINT_STATE_FILE`,
 `COUNTERPOINT_CHECKOUT_DIR`, and `COUNTERPOINT_CONFIG_FILE`, all absolute

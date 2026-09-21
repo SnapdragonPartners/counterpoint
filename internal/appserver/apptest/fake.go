@@ -654,7 +654,45 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 		f.notify("turn/completed", map[string]any{"threadId": "thr_other", "turn": map[string]any{"id": "turn_other", "status": "failed",
 			"items": []any{}, "error": map[string]any{"message": "NOISE FAILURE"}}})
 	}
+	// Token usage, which the client records for the completed round. The
+	// counters are distinguishable per field so a test can tell which
+	// landed where, and the usage scenarios exercise a report for another
+	// turn (ignored), a second report superseding the first, and a turn
+	// that reports none at all.
+	usage := func(last, total int64) {
+		f.notify("thread/tokenUsage/updated", map[string]any{
+			"threadId": threadID, "turnId": turnID,
+			"tokenUsage": map[string]any{
+				"last": map[string]any{"inputTokens": last, "cachedInputTokens": last / 2, "cacheWriteInputTokens": last / 4,
+					"outputTokens": last / 5, "reasoningOutputTokens": last / 10, "totalTokens": last},
+				"total": map[string]any{"inputTokens": total, "cachedInputTokens": total / 2, "cacheWriteInputTokens": total / 4,
+					"outputTokens": total / 5, "reasoningOutputTokens": total / 10, "totalTokens": total},
+			},
+		})
+	}
+	reportUsage := func() {
+		switch f.scenario {
+		case "no-usage":
+		case "usage-other-turn":
+			// A complete, well-formed report attributed to a different
+			// turn on the same thread. It is complete on purpose: the
+			// client must refuse it for the turn id, not because it
+			// happens to be malformed.
+			counters := map[string]any{"inputTokens": 999999, "cachedInputTokens": 1, "cacheWriteInputTokens": 1,
+				"outputTokens": 1, "reasoningOutputTokens": 1, "totalTokens": 999999}
+			f.notify("thread/tokenUsage/updated", map[string]any{
+				"threadId": threadID, "turnId": "turn_elsewhere",
+				"tokenUsage": map[string]any{"last": counters, "total": counters},
+			})
+		case "usage-superseded":
+			usage(100, 1000)
+			usage(2000, 9000)
+		default:
+			usage(2000, 9000)
+		}
+	}
 	complete := func(status string, extra map[string]any) {
+		reportUsage()
 		noise()
 		t := map[string]any{"id": turnID, "status": status, "items": []any{}}
 		for k, v := range extra {

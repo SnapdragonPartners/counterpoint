@@ -88,6 +88,10 @@ type Workflow struct {
 	Round           int      `json:"round"`
 	LastReview      string   `json:"last_review"`
 	LastWarnings    []string `json:"last_warnings,omitempty"`
+	// LastUsage is what the newest round cost, absent for a workflow last
+	// reviewed before usage was tracked. It is not part of the replay
+	// comparison: it records what the round spent, not what it decided.
+	LastUsage *Usage `json:"last_usage,omitempty"`
 	// History holds the completed rounds before the one in LastReview,
 	// oldest first, under the bounds in history.go.
 	History []HistoryRecord `json:"history,omitempty"`

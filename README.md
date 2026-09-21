@@ -282,6 +282,36 @@ before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
   echoed back. After a resume the app-server may omit that value, so an empty
   `reported_effort` means it was not reported, not that no effort applied.
 
+## Token usage
+
+`counterpoint --usage` prints the token usage the app-server reported for
+each recorded round, per branch, newest first, and exits. It is a report of
+what was reported, not a measurement of what a round cost:
+
+```
+Counterpoint token usage from ~/.config/counterpoint/state.json
+Completed rounds only; failed and interrupted rounds are not recorded.
+Every figure is what the app-server reported, not a cost Counterpoint measured.
+
+/Users/you/code/project/.git::refs/heads/feature
+  round 3    7de7d024eb12  last report 22,644 tokens  (input 18,234, cached 12,000, output 4,410, reasoning 3,890)
+  round 2    3b72c9bbe66f  last report 19,100 tokens  (input 15,900, cached 9,800, output 3,200, reasoning 2,700)
+  thread total reported at round 3: 61,744 tokens
+
+1 workflow(s), 2 recorded round(s).
+Sum of last reports: 41,744 tokens.
+A last report may cover only the final model request of a turn rather than
+the whole turn, so treat these as reported figures and the sum as a lower
+bound, not as measured round costs.
+```
+
+It counts completed rounds only, so a review that failed or timed out is
+missing from the totals, and usage is discarded when the ledger record it
+belongs to is evicted. Rounds reviewed before usage was tracked print as
+not recorded rather than as zero. The figures are the app-server's own and
+are labelled as such, because the protocol does not define what a last
+report covers. `docs/SPEC.md` has the full contract.
+
 ## Development
 
 ```bash

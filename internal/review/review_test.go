@@ -52,6 +52,9 @@ type fakeReviewer struct {
 	named          []string
 	nameErr        error
 	reviewText     string // when set, the review text returned instead of the derived one
+	turns          int
+	noUsage        bool
+	forceUsage     *appserver.Usage
 }
 
 func (f *fakeReviewer) StartThread(ctx context.Context, cwd string, sb appserver.Sandbox) (appserver.Thread, error) {
@@ -155,7 +158,21 @@ func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string
 	if f.reviewText != "" {
 		text = f.reviewText
 	}
-	return &appserver.Review{TurnID: "turn_1", Text: text, Warnings: warnings}, nil
+	f.mu.Lock()
+	f.turns++
+	// Distinct per turn so a test can tell which round's usage was kept.
+	u := &appserver.Usage{
+		Last:  appserver.UsageBreakdown{Input: int64(100 * f.turns), Total: int64(100 * f.turns)},
+		Total: appserver.UsageBreakdown{Input: int64(1000 * f.turns), Total: int64(1000 * f.turns)},
+	}
+	if f.noUsage {
+		u = nil
+	}
+	if f.forceUsage != nil {
+		u = f.forceUsage
+	}
+	f.mu.Unlock()
+	return &appserver.Review{TurnID: "turn_1", Text: text, Warnings: warnings, Usage: u}, nil
 }
 
 // lastCwd is the cwd of the most recent StartThread or ResumeThread.
@@ -1672,6 +1689,14 @@ func TestHistoryRecordBytesIsAnUpperBoundOnTheEncodedSize(t *testing.T) {
 		if name == "placeholder" {
 			rec.Omitted = state.OmittedTooLarge
 		}
+		// Usage is part of the record, so the framing bound must cover
+		// its counters too; the largest plausible values are used so the
+		// check is against the widest encoding.
+		big := state.UsageBreakdown{
+			Input: math.MaxInt64, Cached: math.MaxInt64, CacheWrite: math.MaxInt64,
+			Output: math.MaxInt64, Reasoning: math.MaxInt64, Total: math.MaxInt64,
+		}
+		rec.Usage = &state.Usage{Last: big, Total: big}
 		for _, alone := range []bool{true, false} {
 			history := []state.HistoryRecord{rec}
 			if !alone {
@@ -1785,10 +1810,16 @@ func TestHistoryEvictionStopsAsSoonAsTheEstimateCoversTheOvershoot(t *testing.T)
 	fillStateTo(t, h.store)
 
 	// Grow the filler by plain bytes, which encode one to one, so the
-	// overshoot is exactly growth minus the spare: 300 bytes under the
-	// record's estimate.
+	// overshoot is exactly growth minus the spare. It is anchored to what
+	// evicting the record really frees, not to the estimate: the estimate
+	// deliberately overstates, so an overshoot just under it would need a
+	// second eviction and this test would stop measuring the loop's
+	// arithmetic. 300 bytes under the real figure keeps one eviction
+	// sufficient while still exceeding nothing the loop could stop at
+	// early.
 	st = loadState(t, h.store)
-	over := historyRecordBytes(rec) - 300
+	freedByOneRecord := encodedSize(t, []state.HistoryRecord{rec}) - encodedSize(t, nil)
+	over := freedByOneRecord - 300
 	filler, _ := st.Get("filler")
 	filler.LastReview += strings.Repeat("x", over+stateSpare)
 	st.Put("filler", filler)
@@ -1845,5 +1876,106 @@ func TestAcceptedEffortsIsNotMutableByCallers(t *testing.T) {
 	}
 	if AcceptedEfforts()[0] != "low" {
 		t.Errorf("AcceptedEfforts()[0] = %q after a caller mutated an earlier copy", AcceptedEfforts()[0])
+	}
+}
+
+// A completed round persists what it cost, and when a later round
+// supersedes it the usage moves into the history record with the verdict.
+func TestUsageIsPersistedAndMovesIntoHistory(t *testing.T) {
+	h := newHarness(t)
+	first := h.repo.git("rev-parse", "HEAD")
+	res, err := h.svc.Review(context.Background(), h.request(first, "r1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Usage == nil || res.Usage.Last.Total != 100 {
+		t.Fatalf("round one usage = %+v, want the first turn's counters", res.Usage)
+	}
+	wf, _ := loadState(t, h.store).Get(h.key(t))
+	if wf.LastUsage == nil || wf.LastUsage.Last.Total != 100 || wf.LastUsage.Total.Total != 1000 {
+		t.Fatalf("stored usage = %+v", wf.LastUsage)
+	}
+
+	second := h.repo.commit("feature-2")
+	if _, err := h.svc.Review(context.Background(), h.request(second, "r2")); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ = loadState(t, h.store).Get(h.key(t))
+	if wf.LastUsage == nil || wf.LastUsage.Last.Total != 200 {
+		t.Errorf("round two usage = %+v, want the second turn's counters", wf.LastUsage)
+	}
+	if len(wf.History) != 1 {
+		t.Fatalf("history = %d records, want the superseded round", len(wf.History))
+	}
+	if u := wf.History[0].Usage; u == nil || u.Last.Total != 100 {
+		t.Errorf("superseded round's usage = %+v, want round one's to have moved with its verdict", u)
+	}
+}
+
+// A replay runs no turn, so it spends nothing and reports nothing; the
+// stored record keeps the usage of the round that actually ran.
+func TestReplayReportsNoUsage(t *testing.T) {
+	h := newHarness(t)
+	commit := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(commit, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.svc.Review(context.Background(), h.request(commit, "r1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Replayed {
+		t.Fatal("second identical request was not replayed")
+	}
+	if res.Usage != nil {
+		t.Errorf("replay reported usage %+v, want none", res.Usage)
+	}
+	wf, _ := loadState(t, h.store).Get(h.key(t))
+	if wf.LastUsage == nil || wf.LastUsage.Last.Total != 100 {
+		t.Errorf("replay disturbed the stored usage: %+v", wf.LastUsage)
+	}
+}
+
+// An app-server that reports no usage leaves it absent, which reads as
+// unknown rather than as a round that cost nothing.
+func TestNoReportedUsageIsStoredAsAbsent(t *testing.T) {
+	h := newHarness(t)
+	h.reviewer.noUsage = true
+	commit := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(commit, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := loadState(t, h.store).Get(h.key(t))
+	if wf.LastUsage != nil {
+		t.Errorf("LastUsage = %+v, want nil when the app-server reported none", wf.LastUsage)
+	}
+}
+
+// Usage that the state file's load-time validation would reject is dropped
+// before the save. Persisting it would wedge the workflow: every later
+// round fails on the stored record, and only hand-editing the state file
+// recovers. The round's telemetry is worth less than the workflow.
+func TestUnusableUsageIsDroppedRatherThanPersisted(t *testing.T) {
+	h := newHarness(t)
+	h.reviewer.forceUsage = &appserver.Usage{
+		Last:  appserver.UsageBreakdown{Input: -1, Total: -1},
+		Total: appserver.UsageBreakdown{Total: -1},
+	}
+	first := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
+		t.Fatalf("round one: %v", err)
+	}
+	wf, _ := loadState(t, h.store).Get(h.key(t))
+	if wf.LastUsage != nil {
+		t.Errorf("stored unusable usage %+v, want it dropped", wf.LastUsage)
+	}
+	if bad := wf.InvalidHistory(); bad != "" {
+		t.Errorf("stored workflow does not validate: %s", bad)
+	}
+
+	// The next round still works, which is the point.
+	second := h.repo.commit("feature-2")
+	if _, err := h.svc.Review(context.Background(), h.request(second, "r2")); err != nil {
+		t.Fatalf("round two after unusable usage: %v", err)
 	}
 }

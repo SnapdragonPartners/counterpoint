@@ -24,6 +24,59 @@ const (
 	OmittedTooLarge = "too-large"
 )
 
+// Usage is the token usage an app-server reported for a completed round.
+// Last is its most recent report for the turn and Total is the figure it
+// labels the thread's total. The scope of each is the app-server's to
+// define and is not established, so neither is a per-turn or lifetime cost
+// a caller may rely on; see docs/SPEC.md, "Token usage".
+type Usage struct {
+	Last  UsageBreakdown `json:"last"`
+	Total UsageBreakdown `json:"total"`
+}
+
+// UsageBreakdown is one set of token counters. Every counter is
+// non-negative; nothing else about their relationships is assumed, because
+// which counters are subsets of which varies by model.
+type UsageBreakdown struct {
+	Input      int64 `json:"input"`
+	Cached     int64 `json:"cached"`
+	CacheWrite int64 `json:"cache_write"`
+	Output     int64 `json:"output"`
+	Reasoning  int64 `json:"reasoning"`
+	Total      int64 `json:"total"`
+}
+
+// negativeCounter names the first counter below zero, or "" when none is.
+func (b UsageBreakdown) negativeCounter() string {
+	for _, c := range [...]struct {
+		name string
+		v    int64
+	}{
+		{"input", b.Input}, {"cached", b.Cached}, {"cache_write", b.CacheWrite},
+		{"output", b.Output}, {"reasoning", b.Reasoning}, {"total", b.Total},
+	} {
+		if c.v < 0 {
+			return c.name
+		}
+	}
+	return ""
+}
+
+// Invalid names the first way u breaks its invariants, or "" when it holds.
+// A nil Usage is valid: absent means unknown.
+func (u *Usage) Invalid() string {
+	if u == nil {
+		return ""
+	}
+	if c := u.Last.negativeCounter(); c != "" {
+		return "last " + c
+	}
+	if c := u.Total.negativeCounter(); c != "" {
+		return "total " + c
+	}
+	return ""
+}
+
 // HistoryRecord is one completed earlier round. Exactly one of Review and
 // Omitted is set.
 type HistoryRecord struct {
@@ -35,6 +88,9 @@ type HistoryRecord struct {
 	// Omitted names why the text was not kept; OmittedTooLarge is the only
 	// value.
 	Omitted string `json:"omitted,omitempty"`
+	// Usage is what the round cost, absent for a round recorded before
+	// usage was tracked. Absent means unknown, never zero.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // injectedBytes is how much review text a prompt quotes for one record.
@@ -44,8 +100,8 @@ func (r HistoryRecord) injectedBytes() int {
 
 // NewHistoryRecord builds the record for a completed round, replacing text
 // over the per-record bound with a placeholder.
-func NewHistoryRecord(round int, commit, base, review string) HistoryRecord {
-	r := HistoryRecord{Round: round, Commit: commit, Base: base}
+func NewHistoryRecord(round int, commit, base, review string, usage *Usage) HistoryRecord {
+	r := HistoryRecord{Round: round, Commit: commit, Base: base, Usage: usage}
 	if len(review) > MaxHistoryRecordBytes {
 		r.Omitted = OmittedTooLarge
 	} else {
@@ -64,7 +120,7 @@ func RetainHistory(history []HistoryRecord, previous HistoryRecord, newestReview
 	out := make([]HistoryRecord, 0, len(history)+1)
 	out = append(out, history...)
 	out = append(out, previous)
-	newestBytes := NewHistoryRecord(0, "", "", newestReview).injectedBytes()
+	newestBytes := NewHistoryRecord(0, "", "", newestReview, nil).injectedBytes()
 	for len(out) > MaxHistoryRecords || historyBytes(out)+newestBytes > MaxHistoryBytes {
 		out = out[1:]
 	}
@@ -112,9 +168,14 @@ func (w Workflow) InvalidHistory() string {
 			return fmt.Sprintf("history record %d has an unknown omission reason", i)
 		case len(r.Review) > MaxHistoryRecordBytes:
 			return fmt.Sprintf("history record %d review is %d bytes, limit %d", i, len(r.Review), MaxHistoryRecordBytes)
+		case r.Usage.Invalid() != "":
+			return fmt.Sprintf("history record %d has a negative usage counter: %s", i, r.Usage.Invalid())
 		}
 	}
-	newest := NewHistoryRecord(0, "", "", w.LastReview).injectedBytes()
+	if c := w.LastUsage.Invalid(); c != "" {
+		return fmt.Sprintf("the last review has a negative usage counter: %s", c)
+	}
+	newest := NewHistoryRecord(0, "", "", w.LastReview, nil).injectedBytes()
 	if total := historyBytes(h) + newest; total > MaxHistoryBytes {
 		return fmt.Sprintf("history quotes %d bytes with the last review, limit %d", total, MaxHistoryBytes)
 	}

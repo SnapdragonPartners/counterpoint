@@ -133,6 +133,26 @@ type Thread struct {
 	ReasoningEffort string
 }
 
+// Usage is the token usage the app-server reported for a turn: Last, its
+// most recent report, and Total, the figure it labels the thread's total.
+// Both are carried verbatim because the schema documents neither's scope,
+// and neither should be treated as an established per-turn or lifetime
+// cost. See docs/SPEC.md, "Token usage".
+type Usage struct {
+	Last  UsageBreakdown
+	Total UsageBreakdown
+}
+
+// UsageBreakdown is one set of token counters.
+type UsageBreakdown struct {
+	Input      int64
+	Cached     int64
+	CacheWrite int64
+	Output     int64
+	Reasoning  int64
+	Total      int64
+}
+
 // Review is a completed review turn.
 type Review struct {
 	TurnID string
@@ -141,6 +161,9 @@ type Review struct {
 	Text string
 	// Warnings lists declined server requests observed during the turn.
 	Warnings []string
+	// Usage is the last usage the app-server reported for the turn, or nil
+	// when it reported none.
+	Usage *Usage
 }
 
 // Start launches the app-server and completes the initialize handshake. ctx
@@ -381,6 +404,11 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 	}
 
 	final := w.result()
+	if final.badUsage > 0 {
+		// Not a review warning: the verdict is unaffected and the calling
+		// agent can do nothing about it.
+		cl.log.Warn("app-server: ignoring malformed token usage reports", "thread", threadID, "turn", resp.Turn.ID, "count", final.badUsage)
+	}
 	warnings := cl.c.takeWarnings()
 	switch final.status {
 	case turnStatusCompleted:
@@ -388,7 +416,7 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		if err != nil {
 			return nil, err
 		}
-		return &Review{TurnID: resp.Turn.ID, Text: text, Warnings: warnings}, nil
+		return &Review{TurnID: resp.Turn.ID, Text: text, Warnings: warnings, Usage: final.usage}, nil
 	case turnStatusFailed:
 		return nil, fmt.Errorf("%w: %s", ErrTurnFailed, final.errorMessage())
 	case turnStatusInterrupted:
@@ -469,6 +497,8 @@ type turnWatcher struct {
 	status   string
 	turnErr  *turnError
 	lastErr  *turnError
+	usage    *Usage
+	badUsage int
 	done     chan struct{}
 	finished bool
 }
@@ -535,6 +565,22 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 			}
 			w.append(&w.messages, n.Item.Text)
 		}
+	case notifyTokenUsage:
+		var n tokenUsageNotification
+		if !unmarshal(params, &n) || !w.matches(n.ThreadID, n.TurnID) {
+			return
+		}
+		// Untrusted child output. A report missing any required field, or
+		// carrying a negative counter, is refused and any earlier valid
+		// report for this turn stands: a malformed message must not be
+		// able to replace a good figure with zeros.
+		if !n.valid() {
+			w.badUsage++
+			return
+		}
+		// The app-server may report several times in a turn; the last
+		// valid report is the turn's standing figure.
+		w.usage = &Usage{Last: n.Usage.Last.resolve(), Total: n.Usage.Total.resolve()}
 	case notifyError:
 		var n errorNotification
 		if unmarshal(params, &n) && w.matches(n.ThreadID, n.TurnID) && !n.WillRetry {
@@ -580,6 +626,8 @@ type turnResult struct {
 	overflow bool
 	turnErr  *turnError
 	lastErr  *turnError
+	usage    *Usage
+	badUsage int
 }
 
 func (w *turnWatcher) result() turnResult {
@@ -593,6 +641,8 @@ func (w *turnWatcher) result() turnResult {
 		overflow: w.overflow,
 		turnErr:  w.turnErr,
 		lastErr:  w.lastErr,
+		usage:    w.usage,
+		badUsage: w.badUsage,
 	}
 }
 

@@ -46,6 +46,7 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout io.Writ
 	fs := flag.NewFlagSet("counterpoint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	showVersion := fs.Bool("version", false, "print the version and exit")
+	showUsage := fs.Bool("usage", false, "print recorded token usage and exit")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -67,6 +68,15 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout io.Writ
 	statePath, err := state.ResolvePath(cfg.StateFile)
 	if err != nil {
 		return err
+	}
+	// A report, not a server: it reads the state file and exits without
+	// starting the MCP transport.
+	if *showUsage {
+		st, lerr := state.NewStore(statePath).Load()
+		if lerr != nil {
+			return lerr
+		}
+		return writeUsage(stdout, st, statePath)
 	}
 	checkoutRoot, err := scratch.ResolveRoot(cfg.CheckoutDir)
 	if err != nil {
