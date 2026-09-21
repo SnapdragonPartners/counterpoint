@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/SnapdragonPartners/counterpoint/internal/review"
 )
@@ -84,6 +87,18 @@ func TestLoadRejects(t *testing.T) {
 		{"wrong spelling convention", `{"reviewEffort":"low"}`},
 		{"trailing object", `{"review_effort":"low"} {"review_effort":"max"}`},
 		{"trailing junk", `{} nonsense`},
+		// Decoder.More reports another element of the current array or
+		// object, so it is false at a stray closing delimiter. These are
+		// the shapes it misses; only an EOF check rejects them.
+		{"trailing brace", `{"review_effort":"low"}}`},
+		{"trailing bracket", `{"review_effort":"low"}] garbage`},
+		{"trailing comma", `{"review_effort":"low"},`},
+		// A null decodes to the same zero value as an absent key, so
+		// accepting it would silently apply the default.
+		{"null root", `null`},
+		{"null effort", `{"review_effort":null}`},
+		{"null state file", `{"state_file":null}`},
+		{"null checkout dir", `{"checkout_dir":null}`},
 		{"wrong type", `{"review_effort":4}`},
 		// The ceiling is the point of the accepted set: levels above
 		// xhigh exist on some models and must not be selectable.
@@ -156,5 +171,36 @@ func TestRejectionNamesTheAcceptedEfforts(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not name %q: %v", want, err)
 		}
+	}
+}
+
+// A FIFO with no writer blocks in os.Open, so the file type must be
+// rejected before the open rather than on the descriptor. Without that,
+// a mistyped COUNTERPOINT_CONFIG_FILE hangs startup instead of reporting
+// invalid configuration.
+func TestLoadRejectsAFIFOWithoutBlocking(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no FIFOs on windows")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	t.Setenv(EnvPath, path)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Load()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("Load on a FIFO = %v, want ErrInvalid", err)
+		}
+	case <-time.After(10 * time.Second):
+		// The goroutine is parked in open(2) and cannot be unwound; the
+		// test binary carries it to exit.
+		t.Fatal("Load blocked on a FIFO instead of rejecting it")
 	}
 }

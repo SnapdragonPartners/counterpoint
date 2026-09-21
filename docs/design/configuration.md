@@ -66,18 +66,33 @@ validates against `review.EffortAccepted` rather than keeping its own copy of
 the set; the dependency runs from the loader to the policy it enforces, which
 is the direction that keeps one definition.
 
-Rejected shapes, each covered by a test: content that is not a JSON object;
-an unknown key, which would otherwise leave the user believing a misspelled
-setting is in force; trailing content after the object; a value of the wrong
-type; an effort outside the accepted set, above the ceiling, or in the wrong
-case; a path that is not absolute; a key set to the empty string, which is a
-mistake rather than a request for the default; a file that is not a regular
-file; and a file over 64 KiB, which is rejected by size before it is read
-whole.
+Rejected shapes, each covered by a test: content that is not a JSON object,
+including a bare `null`; an unknown key, which would otherwise leave the
+user believing a misspelled setting is in force; trailing content after the
+object, including a stray closing delimiter; a value of the wrong type; a
+key whose value is `null`; an effort outside the accepted set, above the
+ceiling, or in the wrong case; a path that is not absolute; a key set to the
+empty string, which is a mistake rather than a request for the default; a
+file that is not a regular file; and a file over 64 KiB, which is rejected
+by size before it is read whole.
 
-A key present but empty is distinguished from a key absent by decoding into
-pointers. Without that the two are the same value and an empty string would
-silently mean "default".
+Parsing goes key by key through `map[string]json.RawMessage` rather than
+into a struct, so the four states a key can be in stay distinct: absent,
+`null`, the wrong type, and a usable value. A struct decode collapses the
+first three into the zero value, which is what made `{"review_effort":null}`
+and a bare `null` silently mean "use the defaults" in round 1.
+
+Trailing content is rejected by requiring the decoder to reach `io.EOF`
+after the object, not by `Decoder.More`. `More` reports whether another
+element of the current array or object follows, so it is false at a stray
+closing delimiter and accepted `{}}` in round 1.
+
+The file's type is checked with `os.Stat` before the open and again on the
+descriptor afterwards. `os.Open` on a FIFO with no writer blocks
+indefinitely, so a check only on the descriptor is unreachable and a
+mistyped path hung startup in round 1. `Stat` follows symlinks, so a
+symlinked configuration file still works; the second check catches a path
+replaced between the two.
 
 The file is trusted to the same degree as the user, per ADR 0001: the
 adversaries are untrusted inputs and the sandboxed reviewer, not a process
@@ -110,11 +125,14 @@ relative configured value refused. `internal/review` covers the accepted
 effort set, the ceiling, and that a configured effort reaches the service
 while an absent one falls back to the default.
 
-Three mutations were run to prove the tests can fail for the defects they
-name: removing `DisallowUnknownFields` (the unknown-key case fails), adding
-`max` to the accepted set (the ceiling case fails), and letting a configured
-value beat the environment (the precedence case fails). All three were
-restored.
+Six mutations were run to prove the tests can fail for the defects they
+name, each restored afterwards: rejecting unknown keys (the unknown-key case
+fails), adding `max` to the accepted set (the ceiling case fails), letting a
+configured value beat the environment (the precedence case fails), reverting
+the EOF check to `Decoder.More` (the trailing-delimiter cases fail),
+accepting `null` as omission (the four null cases fail), and checking the
+file type only on the open descriptor (the FIFO case blocks and fails on its
+ten-second bound).
 
 ## Documentation
 

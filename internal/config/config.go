@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/SnapdragonPartners/counterpoint/internal/review"
@@ -59,14 +60,12 @@ type Config struct {
 	Path string
 }
 
-// file is the on-disk shape. Pointers distinguish a key that is absent from
-// one explicitly set to the empty string: the first falls through to the
-// next source, the second is a mistake and is rejected.
-type file struct {
-	ReviewEffort *string `json:"review_effort"`
-	StateFile    *string `json:"state_file"`
-	CheckoutDir  *string `json:"checkout_dir"`
-}
+// knownKeys is every key the configuration file may contain. Parsing is
+// key by key rather than into a struct so that the four states a key can be
+// in stay distinct: absent, null, the wrong type, and a usable value. A
+// struct decode collapses the first three into the zero value, which would
+// let an explicit null silently mean "use the default".
+var knownKeys = [...]string{"review_effort", "state_file", "checkout_dir"} //nolint:gochecknoglobals // constant table
 
 // Load reads the configuration file and returns the resolved configuration.
 // A missing file is not an error: it yields the built-in defaults. Any file
@@ -94,34 +93,82 @@ func Load() (Config, error) {
 	}
 	cfg.Path = path
 
-	var f file
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	// An unknown key is a typo that would otherwise be silently ignored,
-	// leaving the user with a setting they believe is in force.
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&f); err != nil {
-		return Config{}, fmt.Errorf("%w: %s: %w", ErrInvalid, path, err)
-	}
-	// Anything after the object means the file is not what it appears to
-	// be; decoding only the first value would accept half a file.
-	if dec.More() {
-		return Config{}, fmt.Errorf("%w: %s: unexpected content after the configuration object", ErrInvalid, path)
-	}
-
-	if f.ReviewEffort != nil {
-		if !review.EffortAccepted(*f.ReviewEffort) {
-			return Config{}, fmt.Errorf("%w: %s: review_effort %q is not one of %s",
-				ErrInvalid, path, *f.ReviewEffort, strings.Join(review.AcceptedEfforts(), ", "))
-		}
-		cfg.ReviewEffort = *f.ReviewEffort
-	}
-	if cfg.StateFile, err = absolute(path, "state_file", f.StateFile); err != nil {
+	fields, err := parse(path, raw)
+	if err != nil {
 		return Config{}, err
 	}
-	if cfg.CheckoutDir, err = absolute(path, "checkout_dir", f.CheckoutDir); err != nil {
+
+	effort, ok, err := text(path, "review_effort", fields)
+	if err != nil {
+		return Config{}, err
+	}
+	if ok {
+		if !review.EffortAccepted(effort) {
+			return Config{}, fmt.Errorf("%w: %s: review_effort %q is not one of %s",
+				ErrInvalid, path, effort, strings.Join(review.AcceptedEfforts(), ", "))
+		}
+		cfg.ReviewEffort = effort
+	}
+	if cfg.StateFile, err = absolute(path, "state_file", fields); err != nil {
+		return Config{}, err
+	}
+	if cfg.CheckoutDir, err = absolute(path, "checkout_dir", fields); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// parse decodes the file into its raw keys, rejecting anything that is not
+// a JSON object, a null in place of one, an unknown key, or any content
+// after the object.
+func parse(path string, raw []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	// A pointer target distinguishes a JSON null, which leaves it nil,
+	// from an object; decoding into the map directly would accept null as
+	// an empty configuration.
+	var fields *map[string]json.RawMessage
+	if err := dec.Decode(&fields); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrInvalid, path, err)
+	}
+	if fields == nil {
+		return nil, fmt.Errorf("%w: %s: null is not a configuration object", ErrInvalid, path)
+	}
+	// Decoder.More reports whether another element of the current array or
+	// object follows, so it is false at a stray closing delimiter and would
+	// accept `{}}`. Requiring the next decode to reach EOF rejects every
+	// trailing byte, whether it parses as a value or not.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: %s: unexpected content after the configuration object", ErrInvalid, path)
+	}
+	for key := range *fields {
+		if !slices.Contains(knownKeys[:], key) {
+			// An unknown key is a typo that would otherwise be silently
+			// ignored, leaving the user with a setting they believe is in
+			// force.
+			return nil, fmt.Errorf("%w: %s: unknown key %q; accepted keys are %s",
+				ErrInvalid, path, key, strings.Join(knownKeys[:], ", "))
+		}
+	}
+	return *fields, nil
+}
+
+// text returns the string value of key and whether it was present. A key
+// present but null is rejected: once decoded it is indistinguishable from
+// omission, so accepting it would silently apply the default.
+func text(path, key string, fields map[string]json.RawMessage) (string, bool, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", false, nil
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return "", false, fmt.Errorf("%w: %s: %s is null; remove the key to use the default", ErrInvalid, path, key)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false, fmt.Errorf("%w: %s: %s: %w", ErrInvalid, path, key, err)
+	}
+	return s, true, nil
 }
 
 // Path returns the configuration file location: EnvPath when set, otherwise
@@ -143,6 +190,22 @@ func Path() (string, error) {
 // read returns the file's bytes, or nil when it does not exist. A file over
 // MaxBytes is rejected without being read whole.
 func read(path string) ([]byte, error) {
+	// The type is checked before the open, not after it: opening a FIFO
+	// with no writer blocks indefinitely, so a stat on the descriptor
+	// would never be reached and a mistyped path would hang startup
+	// instead of reporting invalid configuration. Stat follows symlinks,
+	// so a configuration file symlinked from elsewhere still works.
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("stat configuration file %s: %w", path, err)
+	}
+	if err := regular(path, info); err != nil {
+		return nil, err
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -152,18 +215,13 @@ func read(path string) ([]byte, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
-	info, err := f.Stat()
-	if err != nil {
+	// Re-checked on the descriptor, so a path replaced between the stat
+	// and the open is rejected rather than read.
+	if info, err = f.Stat(); err != nil {
 		return nil, fmt.Errorf("stat configuration file %s: %w", path, err)
 	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("%w: %s is a directory", ErrInvalid, path)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalid, path)
-	}
-	if info.Size() > MaxBytes {
-		return nil, fmt.Errorf("%w: %s is %d bytes, limit %d", ErrInvalid, path, info.Size(), MaxBytes)
+	if err := regular(path, info); err != nil {
+		return nil, err
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(f, MaxBytes+1))
@@ -177,18 +235,37 @@ func read(path string) ([]byte, error) {
 	return raw, nil
 }
 
+// regular rejects anything that is not a readable regular file within the
+// size bound.
+func regular(path string, info os.FileInfo) error {
+	if info.IsDir() {
+		return fmt.Errorf("%w: %s is a directory", ErrInvalid, path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is not a regular file", ErrInvalid, path)
+	}
+	if info.Size() > MaxBytes {
+		return fmt.Errorf("%w: %s is %d bytes, limit %d", ErrInvalid, path, info.Size(), MaxBytes)
+	}
+	return nil
+}
+
 // absolute validates an optional path value. An absent key yields "", which
 // leaves the built-in default in force; a key set to anything but an
 // absolute path is rejected.
-func absolute(path, key string, v *string) (string, error) {
-	if v == nil {
+func absolute(path, key string, fields map[string]json.RawMessage) (string, error) {
+	v, ok, err := text(path, key, fields)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
 		return "", nil
 	}
-	if *v == "" {
+	if v == "" {
 		return "", fmt.Errorf("%w: %s: %s is empty; remove the key to use the default", ErrInvalid, path, key)
 	}
-	if !filepath.IsAbs(*v) {
-		return "", fmt.Errorf("%w: %s: %s must be an absolute path, got %q", ErrInvalid, path, key, *v)
+	if !filepath.IsAbs(v) {
+		return "", fmt.Errorf("%w: %s: %s must be an absolute path, got %q", ErrInvalid, path, key, v)
 	}
-	return *v, nil
+	return v, nil
 }

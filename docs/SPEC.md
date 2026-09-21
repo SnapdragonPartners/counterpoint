@@ -704,12 +704,20 @@ keeps winning.
 A missing file is the normal case and means the defaults. A file that exists
 is validated in full when the process starts, before any review, and any
 rejection ends startup with an error naming the file, the key, and the
-accepted values. Rejected: anything that is not a JSON object; an unknown
-key, which would otherwise leave a misspelled setting silently inert; content
-after the object; a value of the wrong type; an effort outside the accepted
-set; a path that is not absolute; a key present but set to the empty string,
-which is a mistake rather than a request for the default; a file that is not
-a regular file; and a file over 64 KiB, refused by size before it is read.
+accepted values. Rejected: anything that is not a JSON object, including a
+bare `null`; an unknown key, which would otherwise leave a misspelled
+setting silently inert; any content after the object, including a stray
+closing delimiter; a value of the wrong type; a key whose value is `null`,
+which once decoded is indistinguishable from omission and would silently
+apply the default; an effort outside the accepted set; a path that is not
+absolute; a key present but set to the empty string, which is a mistake
+rather than a request for the default; and a file over 64 KiB.
+
+The file's type is checked before it is opened, and again on the open
+descriptor. Opening a FIFO with no writer blocks indefinitely, so checking
+only the descriptor would let a mistyped path hang startup rather than
+report invalid configuration. The check follows symlinks, so a
+configuration file symlinked from elsewhere works.
 
 The file's location and the values in force are logged at startup. Reasoning
 and rejected alternatives are in `docs/design/configuration.md`.
