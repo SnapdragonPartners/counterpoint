@@ -171,6 +171,28 @@ func watchCall(reqCtx context.Context, req *mcp.CallToolRequest, id string, end 
 		start := now()
 		lastSent := start
 		ended := false
+		// checkSilence ends the call once the gap since the last heartbeat
+		// reaches MaxSilence. It runs both before a heartbeat and after
+		// one, against the same lastSent, because the gap a sleep opens
+		// has to be measured before the post-send reading replaces it: a
+		// sleep that lands while a heartbeat is in flight is invisible to
+		// the pre-send check, and moving lastSent past it would leave the
+		// next interval measuring from after the sleep, erasing it
+		// entirely.
+		checkSilence := func(t time.Time) {
+			silence := t.Sub(lastSent)
+			if ended || silence < MaxSilence {
+				return
+			}
+			ended = true
+			why := "the machine slept"
+			if token == nil {
+				why = "the request carried no progress token, so no heartbeat could be sent"
+			}
+			log.Warn("review call ended: silent toward the client", "request", id, "silence", silence.Round(time.Second), "reason", why)
+			end(fmt.Errorf("%w: %v without a heartbeat or a result (%s), which a client's default idle timeout of %v does not survive, so the client has probably given up; retry to start a fresh round",
+				ErrSilence, silence.Round(time.Second), why, ClientIdleTimeout))
+		}
 		for n := 1; ; n++ {
 			select {
 			case <-ctx.Done():
@@ -178,16 +200,7 @@ func watchCall(reqCtx context.Context, req *mcp.CallToolRequest, id string, end 
 			case <-ticker.C:
 			}
 			t := now()
-			if silence := t.Sub(lastSent); !ended && silence >= MaxSilence {
-				ended = true
-				why := "the machine slept"
-				if token == nil {
-					why = "the request carried no progress token, so no heartbeat could be sent"
-				}
-				log.Warn("review call ended: silent toward the client", "request", id, "silence", silence.Round(time.Second), "reason", why)
-				end(fmt.Errorf("%w: %v without a heartbeat or a result (%s), which a client's default idle timeout of %v does not survive, so the client has probably given up; retry to start a fresh round",
-					ErrSilence, silence.Round(time.Second), why, ClientIdleTimeout))
-			}
+			checkSilence(t)
 			if token == nil {
 				continue
 			}
@@ -200,7 +213,11 @@ func watchCall(reqCtx context.Context, req *mcp.CallToolRequest, id string, end 
 				log.Warn("progress heartbeat stopped: notification failed", "request", id, "error", err)
 				return
 			}
-			lastSent = now()
+			// Measured against the heartbeat before this one, then
+			// adopted as the new baseline.
+			sent := now()
+			checkSilence(sent)
+			lastSent = sent
 		}
 	}()
 	return func() {

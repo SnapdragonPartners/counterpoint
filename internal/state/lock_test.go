@@ -265,3 +265,35 @@ func TestTryLockFileTakesAFreeLockAndRefusesAHeldOne(t *testing.T) {
 		t.Error("Release did not close the file it took ownership of")
 	}
 }
+
+// A wait already under way is cut short by cancellation rather than
+// running to its deadline. The final save waits FinalSaveLockWait, thirty
+// seconds, and the silence guard ends a call by cancelling its context; if
+// that did not reach a wait in progress, an ended call would still sit on
+// the lock for the rest of the wait. Issue #44 was misdiagnosed as exactly
+// that before the real defect was found in the heartbeat watcher, so the
+// property is pinned here rather than inferred from the code.
+func TestAcquireLockCancellationCutsAWaitInProgressShort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json.lock")
+	release := startHolder(t, path)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := AcquireLock(ctx, path, FinalSaveLockWait)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	// Generous against FinalSaveLockWait so a loaded machine does not
+	// fail it, while still proving the wait did not run its course.
+	if elapsed > 5*time.Second {
+		t.Errorf("took %v to return after cancellation; the %v wait was not cut short", elapsed, FinalSaveLockWait)
+	}
+}

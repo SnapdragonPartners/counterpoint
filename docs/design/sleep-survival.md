@@ -442,3 +442,40 @@ contract, its client-configuration section drops "the MVP does not send
 progress notifications", its deferral list drops progress notifications,
 its required tests gain the cases above, and its status list gains this
 issue.
+
+## Amendment, 2026-09-21: a sleep during a heartbeat was erased
+
+[Issue 44](https://github.com/SnapdragonPartners/counterpoint/issues/44)
+began as a flaky test and turned out to be a defect in this guard.
+
+Each interval the watcher read the clock, measured the silence, sent the
+heartbeat, then read the clock a second time and made that reading the new
+`lastSent`. A sleep landing between those two readings — that is, while a
+heartbeat was in flight — was measured by neither. The first reading was
+taken before it, and the second was adopted as the baseline without ever
+being compared to the previous one. Every later interval then measured from
+after the sleep, so the gap was gone: the guard could not fire, and the call
+ran on unobserved for exactly the case this document exists to handle.
+
+The fix measures the post-send reading against the same previous
+`lastSent`, and only then adopts it. The silence check therefore runs twice
+an interval, on both sides of the send.
+
+Evidence, since a flake is not a diagnosis. A clock that jumps at a chosen
+reading pins where the sleep lands:
+`TestSilenceGuardCatchesASleepDuringAHeartbeat` puts an hour on the third
+reading, which is the one taken after the first heartbeat. Before the fix
+the call never ended, through a thousand clock readings; after it, the
+guard fires in under a second. The flake itself was reproducible at roughly
+one run in twenty under `-race -cpu=1`, and twenty runs under those
+conditions are now clean.
+
+Two things were wrongly suspected along the way and are recorded so they
+are not suspected again. The flake was first attributed to the count-based
+assertions in `TestHeartbeatsForTheLifeOfTheCall`, which are not involved.
+It was then attributed to cancellation failing to cut short the final
+save's thirty-second lock wait, on the strength of failing runs lasting
+thirty seconds; that duration is the test's own cleanup, not execution
+after the guard fired. `TestAcquireLockCancellationCutsAWaitInProgressShort`
+now pins the lock behaviour directly: with the cancellation checks removed
+the wait runs its full thirty seconds, and with them it returns at once.

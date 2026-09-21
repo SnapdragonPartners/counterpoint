@@ -122,7 +122,17 @@ func (f *fixture) wire(t *testing.T, server *mcp.Server) {
 
 // callReview starts a review call in the background and returns its
 // outcome channel. token, when non-empty, is sent as the progress token.
-func (f *fixture) callReview(ctx context.Context, dir, token string) <-chan callOutcome {
+//
+// The call's context is cancelled on cleanup, and because cleanups run
+// last-registered-first that cancellation happens before wire's session
+// closes. Without it a test that fails while a call is in flight waits
+// out the call's remaining budget during a graceful session close, which
+// turned a ten-second assertion failure into a thirty-second one and made
+// the real defect harder to see.
+func (f *fixture) callReview(t *testing.T, ctx context.Context, dir, token string) <-chan callOutcome { //nolint:revive // t first would fight the ctx convention here
+	t.Helper()
+	ctx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
 	out := make(chan callOutcome, 1)
 	params := &mcp.CallToolParams{Name: ToolName, Arguments: map[string]any{
 		"repo": dir, "branch": "feature", "commit": "HEAD", "branch_notes": "notes",
@@ -219,7 +229,7 @@ func TestHeartbeatsForTheLifeOfTheCall(t *testing.T) {
 	f := newFixture()
 	f.wire(t, f.build(lifecycle, newService(t, rev)))
 
-	outcome := f.callReview(context.Background(), dir, "hb-1")
+	outcome := f.callReview(t, context.Background(), dir, "hb-1")
 	<-rev.started
 	f.progress.awaitCount(t, 3)
 
@@ -266,7 +276,7 @@ func TestNoTokenMeansNoHeartbeatAndABoundedCall(t *testing.T) {
 	f := newFixture()
 	f.wire(t, f.build(context.Background(), newService(t, rev)))
 
-	outcome := f.callReview(context.Background(), dir, "")
+	outcome := f.callReview(t, context.Background(), dir, "")
 	<-rev.started
 	time.Sleep(5 * testHeartbeat)
 	if n := f.progress.count(); n != 0 {
@@ -310,7 +320,7 @@ func TestSilenceGuardEndsABlockedTurn(t *testing.T) {
 	f := newFixture()
 	f.wire(t, f.build(context.Background(), newService(t, rev)))
 
-	outcome := f.callReview(context.Background(), dir, "hb-2")
+	outcome := f.callReview(t, context.Background(), dir, "hb-2")
 	<-rev.started
 	f.progress.awaitCount(t, 2)
 	// With heartbeats each sleep is measured from the last heartbeat, so
@@ -361,7 +371,7 @@ func TestSilenceGuardEndsAnUnbudgetedPhase(t *testing.T) {
 	f := newFixture()
 	f.wire(t, f.build(context.Background(), svc))
 
-	outcome := f.callReview(context.Background(), dir, "hb-3")
+	outcome := f.callReview(t, context.Background(), dir, "hb-3")
 	<-rev.started
 	time.Sleep(5 * testHeartbeat) // the save is waiting on the lock by now
 	start := time.Now()
@@ -414,7 +424,7 @@ func TestClientCancellationEndsTheReview(t *testing.T) {
 	f.wire(t, f.build(context.Background(), newService(t, rev)))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	outcome := f.callReview(ctx, dir, "hb-4")
+	outcome := f.callReview(t, ctx, dir, "hb-4")
 	<-rev.started
 	cancel()
 	if res := await(t, outcome); !errors.Is(res.err, context.Canceled) {
@@ -449,7 +459,7 @@ func TestHeartbeatsThroughAStalledFakeTurn(t *testing.T) {
 	f.wire(t, f.build(context.Background(), svc))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	outcome := f.callReview(ctx, dir, "hb-5")
+	outcome := f.callReview(t, ctx, dir, "hb-5")
 	// The fake records the instructions when the turn starts; from then
 	// on it stalls until interrupted, and heartbeats must keep coming.
 	deadline := time.Now().Add(30 * time.Second)
@@ -499,4 +509,61 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// jumpingClock jumps forward by d at its nth reading and stays there. It
+// pins where a machine sleep lands relative to the watcher's clock reads,
+// which a clock advanced from another goroutine cannot do.
+type jumpingClock struct {
+	base     int64
+	readings atomic.Int64
+	at       int64
+	d        time.Duration
+}
+
+func (c *jumpingClock) now() time.Time {
+	if c.readings.Add(1) >= c.at {
+		return time.Unix(0, c.base+int64(c.d))
+	}
+	return time.Unix(0, c.base)
+}
+
+// A sleep that lands while a heartbeat is in flight must still end the
+// call. watchCall reads the clock once at start, then twice per interval:
+// before the heartbeat and after it. A sleep on the third reading is one
+// that happened during the first heartbeat, so the pre-send check saw
+// nothing; if the post-send reading simply became the new baseline, the
+// hour would be erased and no later interval could ever see it.
+func TestSilenceGuardCatchesASleepDuringAHeartbeat(t *testing.T) {
+	dir := gitRepo(t)
+	rev := &releasableReviewer{
+		blockingReviewer: blockingReviewer{started: make(chan struct{}), closed: make(chan struct{})},
+		release:          make(chan struct{}),
+	}
+	// Released whatever the outcome, so a failed assertion cannot leave
+	// the reviewer blocked and the cleanup waiting on it.
+	defer close(rev.release)
+
+	clock := &jumpingClock{base: time.Now().UnixNano(), at: 3, d: time.Hour}
+	f := newFixture()
+	log := slog.New(slog.NewTextHandler(f.logs, nil))
+	f.wire(t, newServer(context.Background(), newService(t, rev), "test", log, testHeartbeat, clock.now))
+
+	// The reviewer is not awaited: an hour passes within the first
+	// interval, and the guard covers every phase, so the call may be
+	// ended before the review is ever started.
+	outcome := f.callReview(t, context.Background(), dir, "hb-jump")
+
+	select {
+	case res := <-outcome:
+		text := toolError(t, res)
+		if !strings.Contains(text, ErrSilence.Error()) || !strings.Contains(text, "the machine slept") {
+			t.Errorf("tool error = %q; want the silence error and the sleep", text)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("an hour passed during a heartbeat and the call never ended (%d clock readings)", clock.readings.Load())
+	}
+	if !strings.Contains(f.logs.String(), "silent toward the client") {
+		t.Errorf("log does not record the ended call:\n%s", f.logs.String())
+	}
 }
