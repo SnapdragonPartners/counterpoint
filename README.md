@@ -284,8 +284,9 @@ before Codex starts. This repository's own `COUNTERPOINT.md` is an example.
 
 ## Token usage
 
-`counterpoint --usage` prints what each recorded round cost, per branch,
-newest first, and exits:
+`counterpoint --usage` prints the token usage the app-server reported for
+each recorded round, per branch, newest first, and exits. It is a report of
+what was reported, not a measurement of what a round cost:
 
 ```
 Counterpoint token usage from ~/.config/counterpoint/state.json

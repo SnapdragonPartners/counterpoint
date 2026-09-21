@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 
@@ -102,5 +103,48 @@ func TestGroupSeparatesThousands(t *testing.T) {
 		if got := group(in); got != want {
 			t.Errorf("group(%d) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Counters come from the app-server and only non-negativity is validated,
+// so a sum large enough to overflow is reachable from reports that pass
+// every check. Wrapping would print a negative token count.
+func TestWriteUsageDoesNotOverflowTheSum(t *testing.T) {
+	huge := state.UsageBreakdown{Total: math.MaxInt64}
+	st := &state.State{Workflows: map[string]state.Workflow{
+		"a": {Round: 1, LastCommit: oid("a"), LastReview: "r", LastUsage: &state.Usage{Last: huge, Total: huge}},
+		"b": {Round: 1, LastCommit: oid("b"), LastReview: "r", LastUsage: &state.Usage{Last: huge, Total: huge}},
+	}}
+	// The premise: these records are valid, so the report must cope.
+	for k, wf := range st.Workflows {
+		if bad := wf.InvalidHistory(); bad != "" {
+			t.Fatalf("%s is not valid, so this does not test what it claims: %s", k, bad)
+		}
+	}
+	var out bytes.Buffer
+	if err := writeUsage(&out, st, "/s/state.json"); err != nil {
+		t.Fatalf("writeUsage: %v", err)
+	}
+	got := out.String()
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "Sum of last reports") && strings.Contains(line, "-") {
+			t.Errorf("wrapped to a negative total: %s", line)
+		}
+	}
+	if !strings.Contains(got, "more than can be represented") {
+		t.Errorf("saturation not reported:\n%s", got)
+	}
+}
+
+func TestAddSaturating(t *testing.T) {
+	if got, sat := addSaturating(2, 3, false); got != 5 || sat {
+		t.Errorf("addSaturating(2,3) = %d, %v", got, sat)
+	}
+	if got, sat := addSaturating(math.MaxInt64, 1, false); got != math.MaxInt64 || !sat {
+		t.Errorf("addSaturating(max,1) = %d, %v", got, sat)
+	}
+	// A later ordinary add must not clear a clamp that already happened.
+	if _, sat := addSaturating(1, 1, true); !sat {
+		t.Error("saturation flag cleared by a later in-range add")
 	}
 }

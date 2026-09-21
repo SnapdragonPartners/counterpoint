@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ import (
 // recorded rather than as zero.
 //
 // Figures are labelled as the app-server reported them and never as a cost
-// this measured. The schema does not define whether a last report covers a
+// measured by Counterpoint. The schema does not define whether a last report covers a
 // whole turn or only its final model request, so a per-round cost derived
 // from one would assert something unestablished.
 func writeUsage(w io.Writer, st *state.State, path string) error {
@@ -36,6 +37,7 @@ func writeUsage(w io.Writer, st *state.State, path string) error {
 	sort.Strings(keys)
 
 	var sum int64
+	var saturated bool
 	var recorded int
 	for _, k := range keys {
 		wf := st.Workflows[k]
@@ -46,7 +48,7 @@ func writeUsage(w io.Writer, st *state.State, path string) error {
 				continue
 			}
 			l := r.usage.Last
-			sum += l.Total
+			sum, saturated = addSaturating(sum, l.Total, saturated)
 			recorded++
 			fmt.Fprintf(b, "  round %-4d %s  last report %s tokens  (input %s, cached %s, output %s, reasoning %s)\n",
 				r.round, short(r.commit), group(l.Total), group(l.Input), group(l.Cached), group(l.Output), group(l.Reasoning))
@@ -63,7 +65,15 @@ func writeUsage(w io.Writer, st *state.State, path string) error {
 	}
 
 	fmt.Fprintf(b, "\n%d workflow(s), %d recorded round(s).\n", len(keys), recorded)
-	fmt.Fprintf(b, "Sum of last reports: %s tokens.\n", group(sum))
+	if saturated {
+		// Counters come from the app-server and only non-negativity is
+		// validated, so a report large enough to overflow the sum is
+		// reachable. Printing a wrapped negative total would be worse
+		// than saying the sum cannot be represented.
+		b.WriteString("Sum of last reports: more than can be represented; at least one reported counter is implausibly large.\n")
+	} else {
+		fmt.Fprintf(b, "Sum of last reports: %s tokens.\n", group(sum))
+	}
 	// The app-server schema does not say whether a last report covers a
 	// whole turn or only its final model request. Presenting the sum as
 	// round-by-round cost would assert the first; saying so would be a
@@ -99,6 +109,17 @@ func short(commit string) string {
 		return commit[:12]
 	}
 	return commit
+}
+
+// addSaturating returns a+b, clamped at math.MaxInt64 rather than wrapping,
+// and whether the clamp has happened. Both values are non-negative: the
+// state file's validation guarantees that much and nothing more, so a
+// counter near the maximum is untrusted input rather than an impossibility.
+func addSaturating(a, b int64, already bool) (int64, bool) {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64, true
+	}
+	return a + b, already
 }
 
 // group renders n with thousands separators, which is the difference

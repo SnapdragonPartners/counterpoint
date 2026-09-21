@@ -133,9 +133,11 @@ type Thread struct {
 	ReasoningEffort string
 }
 
-// Usage is the token usage the app-server reported for a turn. Last is its
-// most recent report and Total is cumulative for the thread. Both are
-// carried because the schema documents neither's scope.
+// Usage is the token usage the app-server reported for a turn: Last, its
+// most recent report, and Total, the figure it labels the thread's total.
+// Both are carried verbatim because the schema documents neither's scope,
+// and neither should be treated as an established per-turn or lifetime
+// cost. See docs/SPEC.md, "Token usage".
 type Usage struct {
 	Last  UsageBreakdown
 	Total UsageBreakdown

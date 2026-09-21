@@ -63,9 +63,30 @@ When a round completes, the superseded round's usage moves into its history
 record exactly as its verdict does, and is evicted with it.
 
 Both are pointers, absent in JSON when unset, so a state file written before
-this change stays valid and reports unknown rather than zero. That is the
-whole migration: no version bump, since the shape is additive and older
-Counterpoints ignore unknown fields.
+this change stays valid and reports unknown rather than zero.
+
+The envelope version is not bumped, and that is a decision with a cost worth
+stating rather than a free consequence of the shape being additive. An older
+binary reads the file happily, because its decoder ignores unknown fields.
+But `Save` re-marshals typed values, so the first review that older binary
+runs rewrites the file without `last_usage` or any history `usage`, for
+every workflow in it, not only the one it reviewed. Running two versions
+against one state file therefore loses recorded usage silently.
+
+Bumping the version would make that loud instead: an older binary would
+reject the file outright, which is what the version 1 to 2 bump chose when
+the history ledger arrived. It is rejected here because the blast radius is
+larger than the defect. An older binary would fail every review until every
+session was upgraded, and a rollback would need the state file deleted,
+which discards thread associations and review history: a branch would start
+a fresh Codex thread and lose its ledger. Those matter to review quality.
+Usage does not: it is telemetry DR has already classified as ephemeral, and
+the version 1 to 2 precedent was protecting the history the prompt quotes,
+which is the axis this case differs on.
+
+So the hazard is documented instead, alongside the existing instruction to
+restart sessions after installing a new version, which is the same hazard's
+other face.
 
 ### Which number is the round's
 
@@ -74,13 +95,17 @@ scope, and the accepted set of meanings differs in a way that matters: if
 `last` is the most recent model request rather than the whole turn, it
 understates a turn that made several. Rather than guess, both are recorded.
 
-`total` is cumulative for the thread, and Counterpoint resumes one thread per
-workflow across rounds, so the newest round's `total` is the branch's
-lifetime spend. That figure lives on `Workflow.LastUsage` and therefore
-survives history eviction, which is the property DR's decision otherwise
-gives up: per-round detail dies with the records, the branch's lifetime total
-does not. Per-round spend is shown as the difference between consecutive
-snapshots wherever both are retained.
+If `total` is cumulative for the thread, then because Counterpoint resumes
+one thread per workflow across rounds the newest round's `total` is the
+branch's lifetime spend, and that figure lives on `Workflow.LastUsage` and
+survives history eviction. That conditional is the interesting property, and
+it is a conditional: the report states the figure and its source and leaves
+the inference to the reader.
+
+An earlier draft of this record had the report show per-round spend as the
+difference between consecutive snapshots. That was dropped in review: a
+difference asserts that `total` accumulates, which is exactly what is not
+established. Nothing in the shipped report computes a difference.
 
 The report never presents either breakdown as a measured cost: a `last`
 value is labelled a last report, their sum is labelled a sum of last reports

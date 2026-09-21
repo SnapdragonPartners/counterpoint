@@ -245,7 +245,8 @@ func (s *Service) Review(ctx context.Context, req Request) (*Result, error) {
 			"duration", time.Since(start), "warnings", len(res.Warnings)}
 		if u := res.Usage; u != nil {
 			args = append(args, "tokens", u.Last.Total, "input", u.Last.Input, "cached", u.Last.Cached,
-				"output", u.Last.Output, "reasoning", u.Last.Reasoning, "thread_tokens", u.Total.Total)
+				"cache_write", u.Last.CacheWrite, "output", u.Last.Output, "reasoning", u.Last.Reasoning,
+				"thread_tokens", u.Total.Total)
 		}
 		s.log.Info("review finished", args...)
 	}

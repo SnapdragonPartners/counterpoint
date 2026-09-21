@@ -25,10 +25,10 @@ const (
 )
 
 // Usage is the token usage an app-server reported for a completed round.
-// Last is its most recent report for the turn; Total is cumulative for the
-// thread, and because one thread serves every round of a workflow, the
-// newest round's Total is the branch's lifetime spend. The scope of each is
-// the app-server's to define; see docs/SPEC.md.
+// Last is its most recent report for the turn and Total is the figure it
+// labels the thread's total. The scope of each is the app-server's to
+// define and is not established, so neither is a per-turn or lifetime cost
+// a caller may rely on; see docs/SPEC.md, "Token usage".
 type Usage struct {
 	Last  UsageBreakdown `json:"last"`
 	Total UsageBreakdown `json:"total"`

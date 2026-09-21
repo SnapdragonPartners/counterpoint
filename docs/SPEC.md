@@ -721,6 +721,13 @@ Three limits are deliberate and are stated in the report:
   interrupted still spent tokens and is not recorded, because persisting a
   round that produced no verdict cuts against completed-only persistence.
   The totals are therefore a floor on what was spent.
+- **A mixed set of versions loses it.** The fields are additive and the
+  envelope version is unchanged, so a Counterpoint predating them reads the
+  file without complaint; its next save then rewrites the file without
+  them, for every workflow, because saving re-marshals typed values. Usage
+  survives only while every process using a state file understands it,
+  which is the existing reason to restart sessions after installing a new
+  version.
 - **Usage dies with the records it describes.** A history record evicted
   under size pressure takes its usage with it, and the newest round's usage
   is replaced when the next round completes. Anything needing longer life is
