@@ -687,9 +687,51 @@ default.
 
 ## Token usage
 
-Counterpoint records what the app-server reported for each completed round.
-The report arrives in `thread/tokenUsage/updated`, carrying a `last`
-breakdown and a `total` one; both are kept, in `last_usage` on the workflow
+Counterpoint records what the app-server reported for each completed round,
+when it reports anything. **On the inline review path it does not**, and
+the cause is upstream rather than here.
+
+`review/start` runs the model work in a separate review delegate session,
+not on the parent thread. In `codex-cli 0.153.1`, the delegate's event
+forwarding discards `EventMsg::TokenCount` before passing the remaining
+events to the parent, and that event is what the app-server turns into
+`thread/tokenUsage/updated`. The usage exists; it never crosses into the
+parent's protocol stream.
+
+A live review on 2026-09-21 confirmed the mechanism end to end. The review
+completed normally in about 144 s with a substantive verdict, the observer
+saw no `thread/tokenUsage/updated` for any id including 2.58 s after
+completion, and the rollouts show 18 usage records in the delegate and none
+in the parent. The same exclusion is present in the `0.155.1` source, so
+upgrading is not a demonstrated fix.
+
+The scope of that statement matters. It is a property of the inline review
+path on the inspected versions, not of every review, every version, or
+every account. `--usage` therefore reports `not recorded` for rounds taken
+this way, and the machinery below is dormant on that path rather than
+wrong.
+
+It is kept rather than removed because the absence is the app-server's, not
+Counterpoint's, and a round whose cost is unknown must not be reported as a
+round that cost nothing.
+
+The pull-based alternative was tested and does not work either.
+`account/usage/read` returns `threadUsage: null` for the delegate as well
+as for the parent, which the pinned source maps from a backend 403 or 404;
+the suppressed status is unknown, and whether it shares a cause with the
+filtering is not established. The account-wide form of the same request
+does work, but it reports what an account spent in a day and never what a
+round cost.
+
+The feature is therefore parked rather than extended. It reopens when a
+supported Codex path exposes review usage with reliable round attribution;
+the client handling, validation, and scenarios are already in place, so
+what is missing is only the channel. Reading Codex's on-disk rollouts and
+switching to detached review were both considered and declined, for the
+reasons in `docs/design/usage-ledger.md`.
+
+The report, when it arrives, is `thread/tokenUsage/updated`, carrying a
+`last` breakdown and a `total` one; both are kept, in `last_usage` on the workflow
 for the newest round and in `usage` on a history record for a retained
 earlier round. The counters are input, cached input, cache writes, output,
 reasoning output, and the total.
@@ -703,7 +745,28 @@ within it, and, in each breakdown, `inputTokens`, `cachedInputTokens`,
 an absent one is its documented zero. No counter may be negative.
 
 A report failing any of these is refused, and an earlier valid report for
-the same turn stands. The two failure modes this prevents are a turn the
+the same turn stands.
+
+A turn's usage may be reported before its completion or after it, and the
+completion itself carries none. The app-server documentation names both
+events and guarantees no ordering between them, so Counterpoint accommodates
+either: it keeps accepting usage for a turn that has finished, which no
+other notification is allowed to revise, and holds the window open for half
+a second after the completion before reading the turn's usage. The
+accommodation is for the absence of a guarantee, not for an observed
+ordering; no live run has ever delivered a report to either side of it. The whole window is waited out
+rather than stopping at the first report, because a turn may report more
+than once and the last report is the one that stands. Half a second is a
+heuristic against a call that takes minutes, not a bound the protocol
+defines; a report arriving later than that is missed, and the log then says
+no usable report was observed before the cutoff. Usage notifications are counted on receipt, before
+any filtering, and a report that cannot be attributed to the turn is
+logged with the thread and turn it named, so a report that was sent but
+filtered is distinguishable from one never sent. When a completed turn
+yields no usable figure the log says so in those terms: no usable report
+was observed before the cutoff, with the counts of reports received,
+refused, and attributed elsewhere. It does not say the server reported
+none, which is a claim about the server that Counterpoint cannot make. The two failure modes this prevents are a turn the
 app-server said nothing about being recorded as a turn that cost nothing,
 and a negative counter being persisted, which would make every later round
 of that workflow fail the load-time validation enforcing the same rule,

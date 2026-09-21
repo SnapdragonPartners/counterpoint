@@ -170,6 +170,137 @@ total as reported, and per-round spend where consecutive snapshots survive.
 The output states that it counts completed rounds only, so the figure is
 never mistaken for the whole bill.
 
+## Outcome, 2026-09-21: unavailable on the inline review path
+
+This section replaces two earlier amendments that recorded hypotheses as
+they were tested. Those hypotheses are in the Git history; what a reader
+needs is the established cause, the limitation, the response, and the
+condition for reopening.
+
+### Established cause
+
+`review/start` does not run the model work on the parent thread. It spawns
+a review delegate session, and in pinned `rust-v0.153.1` the delegate's
+`forward_events` discards `EventMsg::TokenCount` along with several session
+and startup events before forwarding the rest to the parent. The
+app-server's `handle_token_count_event` is what turns a `TokenCount` into
+`thread/tokenUsage/updated`, and it never receives the review's. The usage
+is produced and recorded; it is filtered out one layer below the protocol.
+
+- `codex-rs/core/src/codex_delegate.rs`, `forward_events`
+- `codex-rs/core/src/tasks/review.rs`, `ReviewTask` and `process_review_events`
+- `codex-rs/app-server/src/bespoke_event_handling.rs`, `handle_token_count_event`
+
+The same exclusion is present in the `0.155.1` source, so upgrading is not
+a demonstrated fix.
+
+### Evidence
+
+One authorized live review, 2026-09-21, Codex Desktop/0.153.1,
+`gpt-6-astra`, high effort. It completed in about 144 s with a substantive
+verdict.
+
+| observation | result |
+| --- | --- |
+| `thread/tokenUsage/updated` on the stream, any id, incl. 2.58 s after completion | none |
+| Counterpoint's own receipt counters | zero received, refused, misattributed |
+| delegate rollout `token_usage_record` entries | 18 |
+| parent rollout usage records | 0 |
+
+Parent `01a0c5bb-206c-7f51-9061-98467a5177a2`; delegate
+`01a0c5bb-22cc-7843-b1f3-c8c05a74ac50`, whose session metadata names that
+parent and `{"subagent":"review"}`. The delegate's `turn_token_usage` for
+the round: 826,307 input of which 772,736 cached, 3,380 output, 1,431
+reasoning, 829,687 total. Those are reported token counters, not a cost
+measurement, and one round is not a basis for conclusions about spend.
+
+### Read-only probes, and exactly what they showed
+
+Five requests against a fresh app-server, no thread resumed and no turn
+started:
+
+| request | result |
+| --- | --- |
+| `account/usage/read` `{threadId: <delegate>}` | `threadUsage: null` |
+| `account/usage/read` `{threadId: <parent>}` | `threadUsage: null` |
+| `account/usage/read` no params | works: `lifetimeTokens`, six `dailyUsageBuckets` |
+| `thread/read` `{threadId: <delegate>}` | works, returns `parentThreadId` |
+| `thread/list` `{pageSize: 50}` | 25 threads, none carrying `parentThreadId` |
+
+The pinned source maps a backend 403 or 404 to `threadUsage: null`, so the
+per-thread query fails for the delegate as well as the parent, and asking
+about the wrong id was not the reason.
+
+**The `thread/list` result does not establish that delegate discovery is
+impossible.** That probe used default parameters: it requested no
+subagent or review source filter and did not paginate beyond the first
+page. It shows only that sub-agent threads did not appear in a default
+first page. Anyone reopening this should not cite it as proof.
+
+### Response
+
+Park the feature. The ledger and `--usage` stay on `main` and stay capable
+of recording a valid report; on the inline review path they report `not
+recorded`, because a round of unknown cost displayed as a round that cost
+nothing would be worse.
+
+Two alternatives were considered and declined. A reader for Codex's
+on-disk rollouts would give per-round accuracy — the records carry the
+parent's id as `session_id` and group a round by `root_turn_id`, so
+discovery would not even need the delegate id — but it takes an ongoing
+compatibility burden on an undocumented private format, and it inverts the
+property that Counterpoint learns about reviews only through the protocol.
+Account-wide daily buckets work and are protocol-only, but they answer a
+different question: what an account spent in a day, never what a round
+cost. Neither is needed to keep reviews working.
+
+The client-side work is retained on its own merits: usage accepted at or
+after a turn's completion without letting any other notification revise
+terminal state, the bounded grace window, and diagnostics that distinguish
+absent from malformed from misattributed. The scenarios covering before,
+after, late, superseded, absent, and unrelated notifications protect real
+client behaviour whatever Codex does.
+
+### Reopening condition
+
+A supported Codex path exposes review usage with reliable round
+attribution. At that point, test the retained client against it rather than
+rebuilding: the handling, the validation, and the scenarios are already in
+place, and what is missing is only the channel.
+
+### Upstream report
+
+To be filed against `openai/codex`, keeping the two observations separate
+since no evidence connects them:
+
+> **Inline review usage never reaches the parent thread**
+>
+> On `codex-cli 0.153.1` (Codex Desktop/0.153.1, `gpt-6-astra`, high
+> effort), an app-server client that runs `review/start` and listens for
+> `thread/tokenUsage/updated` receives nothing, although the review
+> completes normally and produces a verdict.
+>
+> `review/start` spawns a review delegate session; `forward_events` in
+> `codex-rs/core/src/codex_delegate.rs` discards `EventMsg::TokenCount`
+> before forwarding the delegate's remaining events to the parent, and
+> `handle_token_count_event` in
+> `codex-rs/app-server/src/bespoke_event_handling.rs` is what emits the
+> notification. The same exclusion is present in `0.155.1`.
+>
+> Observed on 2026-09-21: no notification on the stream for any id,
+> including 2.58 s after completion; the delegate's rollout holds 18
+> `token_usage_record` entries and the parent's holds none.
+>
+> Separately, `account/usage/read` returns `threadUsage: null` for both
+> the parent and the delegate, which the pinned source maps from a
+> backend 403 or 404; the suppressed status is unknown. Whether that
+> shares a cause with the filtering is not established.
+>
+> A fix would need to expose review usage with correct thread and turn
+> attribution. Simply removing `TokenCount` from the delegate drop-list
+> looks insufficient: the delegate's totals must not overwrite or be
+> double-counted into the parent's cumulative totals.
+
 ## Rejected alternatives
 
 **A separate append-only ledger file.** Survives eviction and keeps the state

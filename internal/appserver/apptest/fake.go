@@ -672,6 +672,8 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 	}
 	reportUsage := func() {
 		switch f.scenario {
+		case "usage-before-completion", "usage-late":
+			usage(2000, 9000)
 		case "no-usage":
 		case "usage-other-turn":
 			// A complete, well-formed report attributed to a different
@@ -692,13 +694,29 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 		}
 	}
 	complete := func(status string, extra map[string]any) {
-		reportUsage()
+		if f.scenario == "usage-before-completion" {
+			reportUsage()
+		}
 		noise()
 		t := map[string]any{"id": turnID, "status": status, "items": []any{}}
 		for k, v := range extra {
 			t[k] = v
 		}
 		f.notify("turn/completed", map[string]any{"threadId": threadID, "turn": t})
+		// After the completion, which is where a server naturally reports
+		// a turn's final usage and where the client used to drop it. The
+		// usage-before-completion scenario covers the other ordering.
+		switch f.scenario {
+		case "usage-before-completion":
+		case "usage-late":
+			// Far enough after the completion that a client reading the
+			// turn's result immediately would miss it, well inside the
+			// window the client holds open.
+			time.Sleep(150 * time.Millisecond)
+			reportUsage()
+		default:
+			reportUsage()
+		}
 	}
 	delta := func(s string) {
 		f.notify("item/agentMessage/delta", map[string]any{"threadId": threadID, "turnId": turnID, "itemId": "m1", "delta": s})

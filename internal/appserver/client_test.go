@@ -887,6 +887,17 @@ func TestReviewRecordsTokenUsage(t *testing.T) {
 			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
 			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
 		}},
+		// The same report sent before the completion instead of after it.
+		{"usage-before-completion", &Usage{
+			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
+			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
+		}},
+		// Reported well after the completion: only the window the client
+		// holds open catches this one.
+		{"usage-late", &Usage{
+			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
+			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
+		}},
 		{"usage-other-turn", nil},
 		{"no-usage", nil},
 	} {
@@ -899,11 +910,38 @@ func TestReviewRecordsTokenUsage(t *testing.T) {
 			if scenario == "" {
 				scenario = "normal"
 			}
-			cl, _ := fakeClient(t, scenario, "")
+			cl, logs := fakeClient(t, scenario, "")
 			th := startThread(t, cl)
 			rev, err := cl.Review(context.Background(), th.ID, "instructions")
 			if err != nil {
 				t.Fatalf("Review: %v", err)
+			}
+			// A scenario that sends no usage notification must leave
+			// every usage counter untouched. The item and message noise
+			// these scenarios emit shares the watcher's attribution
+			// guard, and a diagnostic that counts it reports usage
+			// reports that were never sent.
+			// A report that arrives and is filtered must still be
+			// counted as received, and named. Counting only accepted
+			// reports would make "sent but filtered" look identical to
+			// "never sent", which is the distinction these lines exist
+			// to draw.
+			if tc.scenario == "usage-other-turn" {
+				got := logs.String()
+				if !strings.Contains(got, "reports_received=1") {
+					t.Errorf("a filtered report was not counted as received:\n%s", got)
+				}
+				if !strings.Contains(got, "for_another_turn=1") || !strings.Contains(got, "token usage reported for another turn") {
+					t.Errorf("a filtered report was not named as such:\n%s", got)
+				}
+			}
+			if tc.scenario == "no-usage" {
+				if got := logs.String(); strings.Contains(got, "token usage reported for another turn") {
+					t.Errorf("item noise was counted as a usage report:\n%s", got)
+				}
+				if got := logs.String(); !strings.Contains(got, "reports_received=0") {
+					t.Errorf("a scenario that sent no usage did not report zero receipts:\n%s", got)
+				}
 			}
 			switch {
 			case tc.want == nil && rev.Usage != nil:
@@ -994,4 +1032,53 @@ func TestMalformedTokenUsageIsRefused(t *testing.T) {
 	if w.usage == nil || w.usage.Last.CacheWrite != 0 || w.badUsage != 0 {
 		t.Errorf("absent cacheWriteInputTokens = %+v, badUsage=%d", w.usage, w.badUsage)
 	}
+}
+
+// The diagnostics must classify and count correctly, because they are
+// what distinguishes a report that was sent and filtered from one never
+// sent. The schema requires threadId and turnId, so a report without them
+// is malformed rather than meant for another turn, and the misattributed
+// count must not be capped by the size of the sample kept for the log.
+func TestUsageDiagnosticsClassifyAndCount(t *testing.T) {
+	counters := `{"inputTokens":1,"cachedInputTokens":1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1}`
+
+	t.Run("missing ids are malformed, not misattributed", func(t *testing.T) {
+		for name, body := range map[string]string{
+			"no ids":    `{"tokenUsage":{"last":` + counters + `,"total":` + counters + `}}`,
+			"no thread": `{"turnId":"u","tokenUsage":{"last":` + counters + `,"total":` + counters + `}}`,
+			"no turn":   `{"threadId":"t","tokenUsage":{"last":` + counters + `,"total":` + counters + `}}`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				w := newTurnWatcher("t")
+				w.setTurn("u")
+				w.handle(notifyTokenUsage, json.RawMessage(body))
+				if w.badUsage != 1 {
+					t.Errorf("badUsage = %d, want the missing id counted as malformed", w.badUsage)
+				}
+				if w.unattributed != 0 || len(w.unattributedUsage) != 0 {
+					t.Errorf("a report with no ids was filed as belonging to another turn: %d %v",
+						w.unattributed, w.unattributedUsage)
+				}
+			})
+		}
+	})
+
+	t.Run("misattributed count is not capped by the sample", func(t *testing.T) {
+		w := newTurnWatcher("t")
+		w.setTurn("u")
+		const sent = maxUnattributedUsage + 3
+		for i := 0; i < sent; i++ {
+			body := fmt.Sprintf(`{"threadId":"t","turnId":"other-%d","tokenUsage":{"last":%s,"total":%s}}`, i, counters, counters)
+			w.handle(notifyTokenUsage, json.RawMessage(body))
+		}
+		if w.unattributed != sent {
+			t.Errorf("unattributed = %d, want %d: the count must not stop at the sample bound", w.unattributed, sent)
+		}
+		if len(w.unattributedUsage) != maxUnattributedUsage {
+			t.Errorf("sample = %d entries, want it capped at %d", len(w.unattributedUsage), maxUnattributedUsage)
+		}
+		if w.usageSeen != sent {
+			t.Errorf("usageSeen = %d, want every report counted on receipt", w.usageSeen)
+		}
+	})
 }
