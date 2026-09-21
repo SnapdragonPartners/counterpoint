@@ -265,3 +265,54 @@ func TestTryLockFileTakesAFreeLockAndRefusesAHeldOne(t *testing.T) {
 		t.Error("Release did not close the file it took ownership of")
 	}
 }
+
+// A wait already under way is cut short by cancellation rather than
+// running to its deadline. The final save waits FinalSaveLockWait, thirty
+// seconds, and the silence guard ends a call by cancelling its context; if
+// that did not reach a wait in progress, an ended call would still sit on
+// the lock for the rest of the wait. Issue #44 was misdiagnosed as exactly
+// that before the real defect was found in the heartbeat watcher, so the
+// property is pinned here rather than inferred from the code.
+func TestAcquireLockCancellationCutsAWaitInProgressShort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json.lock")
+	release := startHolder(t, path)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := AcquireLock(ctx, path, FinalSaveLockWait)
+		done <- err
+	}()
+
+	// The wait must already be under way before it is cancelled.
+	// Cancelling on a timer alone races the call: a cancellation that
+	// lands first is caught by the check at the top of AcquireLock, which
+	// is the pre-cancelled path TestAcquireLockPreCanceledHasNoSideEffects
+	// already covers, and this test would pass while proving nothing
+	// about a wait in progress. Still being blocked is the observable
+	// that says the retry loop was reached.
+	select {
+	case err := <-done:
+		t.Fatalf("AcquireLock returned before it could block on the held lock: %v", err)
+	case <-time.After(10 * lockPollInterval):
+	}
+
+	// Measured from the cancellation, not from the call, so the figure is
+	// the time cancellation took to be noticed.
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		// Generous against FinalSaveLockWait so a loaded machine does not
+		// fail it, while still proving the wait did not run its course.
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("took %v to notice cancellation; the %v wait was not cut short", elapsed, FinalSaveLockWait)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("cancellation did not cut the %v wait short", FinalSaveLockWait)
+	}
+}

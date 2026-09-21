@@ -617,7 +617,13 @@ minutes less one interval, in whatever phase the call is: the turn is
 interrupted, the child reaped, the lock released, and the tool error names
 the silence and its reason. A review that has already completed and been
 recorded when the bound is reached is returned as a success, since the next
-identical request would replay it. Every client check before Counterpoint's
+identical request would replay it. The silence is measured twice each interval, before
+the heartbeat is sent and again after it, both against the same previous
+heartbeat, and only then does the later reading become the new baseline. A
+sleep that lands while a heartbeat is in flight is invisible to the first
+measurement, and adopting the post-send reading without measuring it would
+erase the gap: every later interval would measure from after the sleep and
+the call would run on unobserved. Every client check before Counterpoint's
 next tick sees at most the silence that tick measures, so the client's
 timer cannot fire first. With heartbeats, silence grows only while the
 machine sleeps: a sleep shorter than twenty-nine minutes is survived with
