@@ -211,6 +211,39 @@ the window to zero fails it. Without that scenario the window was not
 load-bearing in any test, so the first version of this fix had a core
 mechanism no test could fail for.
 
+## Amendment, 2026-09-21: the channel is silent on this version
+
+An authorized live review settled it, against the hypothesis above. No
+`thread/tokenUsage/updated` appeared anywhere on the app-server stream
+during the review or for 2.58 s after it completed, and the candidate's own
+counters recorded zero reports received. Neither the attribution filter nor
+the grace window explains the missing usage, because nothing arrived to
+filter or to wait for.
+
+`account/usage/read` with the same thread returned `threadUsage: null`.
+In the pinned `rust-v0.153.1` source that handler queries the backend
+directly, needs no resumed thread, and converts a backend 403 or 404 into
+`null` while a successful response missing the thread produces an error. So
+the null is a suppressed backend refusal, and resuming the thread first is
+not a next hypothesis. That closes the pull-based alternative as well.
+
+Both observations stay separate until a shared cause is shown. What follows
+for this design: the mechanism is dormant on the runtime this repository is
+developed against, and the honest reporting of "not recorded" is the
+feature's actual behaviour there. It is retained rather than reverted
+because the silence is the app-server's, and because a round of unknown cost
+reported as zero would be worse than one reported as unknown.
+
+The late-notification accommodation and the grace window are retained too,
+on a narrower justification than the one they were written with. They are
+not there because reports arrive after completion; nothing has ever been
+observed to arrive at all. They are there because the app-server
+documentation guarantees no ordering between the two events, and a
+half-second on a call that takes minutes is a cheaper way to be robust to
+both orderings than a fake that picks one and a client that believes it.
+That was the original defect in this feature, and it is the reason the
+scenarios now cover before, after, late, superseded, and absent.
+
 Usage notifications are counted on receipt, before any filtering, and the
 count is logged with the refusal and misattribution counts beside it. The
 line says no usable report was observed before the cutoff rather than that

@@ -305,6 +305,12 @@ the whole turn, so treat these as reported figures and the sum as a lower
 bound, not as measured round costs.
 ```
 
+**On `codex-cli 0.153.1` every round reports `not recorded`**, because that
+version sends no token usage for a review and its per-thread usage query
+returns nothing for it. The command and the ledger are in place for an
+app-server that does report; a round whose cost is unknown is shown as
+unknown rather than as free. `docs/SPEC.md` records the evidence.
+
 It counts completed rounds only, so a review that failed or timed out is
 missing from the totals, and usage is discarded when the ledger record it
 belongs to is evicted. Rounds reviewed before usage was tracked print as

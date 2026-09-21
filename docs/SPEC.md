@@ -681,9 +681,22 @@ default.
 
 ## Token usage
 
-Counterpoint records what the app-server reported for each completed round.
-The report arrives in `thread/tokenUsage/updated`, carrying a `last`
-breakdown and a `total` one; both are kept, in `last_usage` on the workflow
+Counterpoint records what the app-server reported for each completed round,
+when it reports anything. **On `codex-cli 0.153.1` it does not.** A live
+review on 2026-09-21 saw no `thread/tokenUsage/updated` on the app-server
+stream at any point, including for 2.58 s after the turn completed, and
+`account/usage/read` for the same thread returned `threadUsage: null`,
+which that version's source produces from a suppressed backend 403 or 404.
+So on the runtime this repository is developed against, `--usage` reports
+`not recorded` for every round, and the machinery below is dormant.
+
+It is kept rather than removed because the absence is the app-server's, not
+Counterpoint's, and a round whose cost is unknown must not be reported as a
+round that cost nothing. Whether other versions, model routes, or accounts
+emit the notification is not established.
+
+The report, when it arrives, is `thread/tokenUsage/updated`, carrying a
+`last` breakdown and a `total` one; both are kept, in `last_usage` on the workflow
 for the newest round and in `usage` on a history record for a retained
 earlier round. The counters are input, cached input, cache writes, output,
 reasoning output, and the total.
@@ -700,10 +713,13 @@ A report failing any of these is refused, and an earlier valid report for
 the same turn stands.
 
 A turn's usage may be reported before its completion or after it, and the
-completion itself carries none. Counterpoint therefore keeps accepting
-usage for a turn that has finished, which no other notification is allowed
-to revise, and holds the window open for half a second after the
-completion before reading the turn's usage. The whole window is waited out
+completion itself carries none. The app-server documentation names both
+events and guarantees no ordering between them, so Counterpoint accommodates
+either: it keeps accepting usage for a turn that has finished, which no
+other notification is allowed to revise, and holds the window open for half
+a second after the completion before reading the turn's usage. The
+accommodation is for the absence of a guarantee, not for an observed
+ordering; no live run has ever delivered a report to either side of it. The whole window is waited out
 rather than stopping at the first report, because a turn may report more
 than once and the last report is the one that stands. Half a second is a
 heuristic against a call that takes minutes, not a bound the protocol
