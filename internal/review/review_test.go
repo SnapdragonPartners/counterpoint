@@ -1834,3 +1834,16 @@ func TestNewUsesTheConfiguredEffort(t *testing.T) {
 		t.Errorf("effort with no option = %q, want %q", svc.effort, DefaultReasoningEffort)
 	}
 }
+
+// The accepted set is policy. A caller that mutated the returned slice
+// would change what configuration accepts, so the getter returns a copy.
+func TestAcceptedEffortsIsNotMutableByCallers(t *testing.T) {
+	got := AcceptedEfforts()
+	got[0] = "max"
+	if EffortAccepted("max") {
+		t.Error("mutating the returned slice changed the accepted set")
+	}
+	if AcceptedEfforts()[0] != "low" {
+		t.Errorf("AcceptedEfforts()[0] = %q after a caller mutated an earlier copy", AcceptedEfforts()[0])
+	}
+}

@@ -37,8 +37,10 @@ has a caller.
 
 ## Design
 
-`os.UserConfigDir()/counterpoint/config.json`, beside the state file, or the
-absolute path in `COUNTERPOINT_CONFIG_FILE`. Absent is the normal case and
+`os.UserConfigDir()/counterpoint/config.json`, beside the default state
+file, or the absolute path in `COUNTERPOINT_CONFIG_FILE`. Its location is
+not affected by `COUNTERPOINT_STATE_FILE`: the configuration names the state
+file, so deriving its own path from that setting would be circular. Absent is the normal case and
 means the defaults; present means valid.
 
 ```json

@@ -678,8 +678,10 @@ environment dumps by default.
 ## Configuration
 
 Counterpoint reads one optional configuration file,
-`os.UserConfigDir()/counterpoint/config.json`, beside the state file, or the
-absolute path in `COUNTERPOINT_CONFIG_FILE`. It is the user's own file: no
+`os.UserConfigDir()/counterpoint/config.json`, beside the default state
+file, or the absolute path in `COUNTERPOINT_CONFIG_FILE`. Its location does
+not follow `COUNTERPOINT_STATE_FILE`, so a redirected state file does not
+move the configuration file with it. It is the user's own file: no
 part of it is read from a reviewed repository, and it carries no
 per-repository policy, which stays limited to `COUNTERPOINT.md`.
 

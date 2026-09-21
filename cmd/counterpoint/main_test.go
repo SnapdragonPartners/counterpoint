@@ -49,6 +49,11 @@ func TestRunRejectsUnknownFlag(t *testing.T) {
 // pipes and checks that protocol bytes reach the injected stdout only.
 func TestRunServesInjectedStreams(t *testing.T) {
 	t.Setenv("COUNTERPOINT_STATE_FILE", t.TempDir()+"/state.json")
+	// run loads configuration, which otherwise falls back to the
+	// developer's or CI's own file; a value there would decide whether
+	// this handshake test passes. Pointing at an absent path pins the
+	// defaults.
+	t.Setenv("COUNTERPOINT_CONFIG_FILE", t.TempDir()+"/absent.json")
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	// Closing every pipe end on exit releases the server and reader

@@ -57,9 +57,11 @@ func EffortAccepted(s string) bool {
 	return slices.Contains(acceptedEfforts[:], s)
 }
 
-// AcceptedEfforts returns the accepted efforts, for error messages.
+// AcceptedEfforts returns the accepted efforts, for error messages. The
+// slice is a copy: the package array is the policy, and a caller that
+// mutated it would silently change what configuration accepts.
 func AcceptedEfforts() []string {
-	return acceptedEfforts[:]
+	return slices.Clone(acceptedEfforts[:])
 }
 
 // Sentinel errors.
@@ -168,7 +170,7 @@ type Options struct {
 	// constructing the Service.
 	ReasoningEffort string
 	// CheckoutRoot is the scratch root for build-capable reviews;
-	// scratch.DefaultRoot when empty.
+	// scratch.ResolveRoot("") when empty.
 	CheckoutRoot string
 }
 

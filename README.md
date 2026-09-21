@@ -204,8 +204,9 @@ directory in a `counterpoint` subdirectory; `COUNTERPOINT_STATE_FILE`
 overrides the path for tests and unusual installations. Diagnostics go to
 stderr only.
 
-An optional configuration file sits beside the state file at
-`config.json`, or at `COUNTERPOINT_CONFIG_FILE`:
+An optional configuration file sits beside the default state file at
+`config.json`, or at `COUNTERPOINT_CONFIG_FILE`. Its own location does not
+follow `COUNTERPOINT_STATE_FILE`:
 
 ```json
 {
