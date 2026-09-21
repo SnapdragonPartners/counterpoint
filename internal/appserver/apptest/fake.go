@@ -674,14 +674,15 @@ func (f *fakeServer) runTurn(threadID, turnID, instructions string, interrupt ch
 		switch f.scenario {
 		case "no-usage":
 		case "usage-other-turn":
-			// Attributed to a different turn on the same thread; the
-			// client must not record it.
+			// A complete, well-formed report attributed to a different
+			// turn on the same thread. It is complete on purpose: the
+			// client must refuse it for the turn id, not because it
+			// happens to be malformed.
+			counters := map[string]any{"inputTokens": 999999, "cachedInputTokens": 1, "cacheWriteInputTokens": 1,
+				"outputTokens": 1, "reasoningOutputTokens": 1, "totalTokens": 999999}
 			f.notify("thread/tokenUsage/updated", map[string]any{
 				"threadId": threadID, "turnId": "turn_elsewhere",
-				"tokenUsage": map[string]any{
-					"last":  map[string]any{"totalTokens": 999999},
-					"total": map[string]any{"totalTokens": 999999},
-				},
+				"tokenUsage": map[string]any{"last": counters, "total": counters},
 			})
 		case "usage-superseded":
 			usage(100, 1000)

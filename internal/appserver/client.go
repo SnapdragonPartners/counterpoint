@@ -501,18 +501,6 @@ type turnWatcher struct {
 	finished bool
 }
 
-// breakdown converts the wire counters to the exported shape.
-func breakdown(b usageBreakdown) UsageBreakdown {
-	return UsageBreakdown{
-		Input:      b.InputTokens,
-		Cached:     b.CachedInputTokens,
-		CacheWrite: b.CacheWriteInputTokens,
-		Output:     b.OutputTokens,
-		Reasoning:  b.ReasoningOutputTokens,
-		Total:      b.TotalTokens,
-	}
-}
-
 func newTurnWatcher(threadID string) *turnWatcher {
 	return &turnWatcher{threadID: threadID, done: make(chan struct{})}
 }
@@ -580,18 +568,17 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 		if !unmarshal(params, &n) || !w.matches(n.ThreadID, n.TurnID) {
 			return
 		}
-		// Untrusted child output: a report with no usage object, or with a
-		// negative counter, is refused rather than recorded. Recording it
-		// would either invent a zero where nothing was reported or
-		// persist a counter that makes every later round of this workflow
-		// fail state validation.
-		if n.Usage == nil || n.Usage.Last.negative() || n.Usage.Total.negative() {
+		// Untrusted child output. A report missing any required field, or
+		// carrying a negative counter, is refused and any earlier valid
+		// report for this turn stands: a malformed message must not be
+		// able to replace a good figure with zeros.
+		if !n.valid() {
 			w.badUsage++
 			return
 		}
 		// The app-server may report several times in a turn; the last
 		// valid report is the turn's standing figure.
-		w.usage = &Usage{Last: breakdown(n.Usage.Last), Total: breakdown(n.Usage.Total)}
+		w.usage = &Usage{Last: n.Usage.Last.resolve(), Total: n.Usage.Total.resolve()}
 	case notifyError:
 		var n errorNotification
 		if unmarshal(params, &n) && w.matches(n.ThreadID, n.TurnID) && !n.WillRetry {

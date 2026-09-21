@@ -689,16 +689,22 @@ earlier round. The counters are input, cached input, cache writes, output,
 reasoning output, and the total.
 
 The notification is child-process output and is validated as untrusted
-input before it is accepted. A notification with no `tokenUsage` object, or
-with `tokenUsage` null, is refused rather than recorded as zeros: the
-app-server said nothing, and nothing must stay unknown. A notification with
-any negative counter is refused, because persisting one would make every
-later round of that workflow fail the load-time validation that the same
-rule enforces, leaving the workflow recoverable only by hand-editing the
-state file. Refusals are counted and logged once per turn; they do not
-affect the verdict and are not review warnings. Usage that would not
-validate is also dropped at the point of saving, so no path can write a
-record the loader will reject.
+input before it is accepted, against what the generated schema requires:
+`tokenUsage` present and non-null, `last` and `total` present and non-null
+within it, and, in each breakdown, `inputTokens`, `cachedInputTokens`,
+`outputTokens`, `reasoningOutputTokens`, and `totalTokens` present.
+`cacheWriteInputTokens` is the one counter the schema makes optional, and
+an absent one is its documented zero. No counter may be negative.
+
+A report failing any of these is refused, and an earlier valid report for
+the same turn stands. The two failure modes this prevents are a turn the
+app-server said nothing about being recorded as a turn that cost nothing,
+and a negative counter being persisted, which would make every later round
+of that workflow fail the load-time validation enforcing the same rule,
+leaving it recoverable only by hand-editing the state file. Refusals are
+counted and logged once per turn; they do not affect the verdict and are
+not review warnings. Usage that would not validate is also dropped at the
+point of saving, so no path can write a record the loader will reject.
 
 Only non-negativity is validated. Which counters are subsets of which varies
 by model, so a relationship rule would reject valid files.

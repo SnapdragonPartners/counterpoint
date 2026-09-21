@@ -99,12 +99,20 @@ fact, and the limitation is recorded in `docs/SPEC.md`.
 ### Validation
 
 Usage arrives as child-process output and is validated where it enters, not
-only where it is read back. A notification with no `tokenUsage` object, or
-with it null, is refused: decoding it into a value type would record zeros
-where the app-server reported nothing, and absent must stay unknown. A
-notification with a negative counter is refused, because persisting one
-makes every later round of the workflow fail the load-time check and leaves
-it recoverable only by hand-editing the state file. Refusals are counted and
+only where it is read back, against the fields the generated schema marks
+required. Every one of them is a pointer in the wire type, at both levels,
+so absent and null are distinguishable from a report of zeros: decoding any
+of them into a value type records zeros where the app-server reported
+nothing, and absent must stay unknown. `cacheWriteInputTokens` is the only
+optional counter and an absent one is its documented zero. A notification
+with a negative counter is refused, because persisting one makes every
+later round of the workflow fail the load-time check and leaves it
+recoverable only by hand-editing the state file. A refused report leaves an
+earlier valid one for the same turn standing.
+
+`resolve` does not assume `valid` ran before it. It is the reader
+goroutine that decodes these messages, so a nil dereference there would
+take the server down rather than lose a counter. Refusals are counted and
 logged once per turn rather than surfaced as review warnings: the verdict is
 unaffected and the calling agent can do nothing about it.
 
