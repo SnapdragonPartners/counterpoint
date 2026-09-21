@@ -216,7 +216,7 @@ measurement, and one round is not a basis for conclusions about spend.
 
 ### Read-only probes, and exactly what they showed
 
-Four requests against a fresh app-server, no thread resumed and no turn
+Five requests against a fresh app-server, no thread resumed and no turn
 started:
 
 | request | result |

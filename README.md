@@ -305,7 +305,7 @@ the whole turn, so treat these as reported figures and the sum as a lower
 bound, not as measured round costs.
 ```
 
-**Rounds reviewed through `codex-cli 0.153.1` report `not recorded`.** That
+**Rounds reviewed with `codex-cli 0.153.1` report `not recorded`.** That
 version runs an inline review in a separate delegate session and drops the
 delegate's token-count events before they reach the parent thread, so the
 usage never appears on the protocol stream Counterpoint listens to. The

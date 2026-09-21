@@ -1033,3 +1033,52 @@ func TestMalformedTokenUsageIsRefused(t *testing.T) {
 		t.Errorf("absent cacheWriteInputTokens = %+v, badUsage=%d", w.usage, w.badUsage)
 	}
 }
+
+// The diagnostics must classify and count correctly, because they are
+// what distinguishes a report that was sent and filtered from one never
+// sent. The schema requires threadId and turnId, so a report without them
+// is malformed rather than meant for another turn, and the misattributed
+// count must not be capped by the size of the sample kept for the log.
+func TestUsageDiagnosticsClassifyAndCount(t *testing.T) {
+	counters := `{"inputTokens":1,"cachedInputTokens":1,"outputTokens":1,"reasoningOutputTokens":1,"totalTokens":1}`
+
+	t.Run("missing ids are malformed, not misattributed", func(t *testing.T) {
+		for name, body := range map[string]string{
+			"no ids":    `{"tokenUsage":{"last":` + counters + `,"total":` + counters + `}}`,
+			"no thread": `{"turnId":"u","tokenUsage":{"last":` + counters + `,"total":` + counters + `}}`,
+			"no turn":   `{"threadId":"t","tokenUsage":{"last":` + counters + `,"total":` + counters + `}}`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				w := newTurnWatcher("t")
+				w.setTurn("u")
+				w.handle(notifyTokenUsage, json.RawMessage(body))
+				if w.badUsage != 1 {
+					t.Errorf("badUsage = %d, want the missing id counted as malformed", w.badUsage)
+				}
+				if w.unattributed != 0 || len(w.unattributedUsage) != 0 {
+					t.Errorf("a report with no ids was filed as belonging to another turn: %d %v",
+						w.unattributed, w.unattributedUsage)
+				}
+			})
+		}
+	})
+
+	t.Run("misattributed count is not capped by the sample", func(t *testing.T) {
+		w := newTurnWatcher("t")
+		w.setTurn("u")
+		const sent = maxUnattributedUsage + 3
+		for i := 0; i < sent; i++ {
+			body := fmt.Sprintf(`{"threadId":"t","turnId":"other-%d","tokenUsage":{"last":%s,"total":%s}}`, i, counters, counters)
+			w.handle(notifyTokenUsage, json.RawMessage(body))
+		}
+		if w.unattributed != sent {
+			t.Errorf("unattributed = %d, want %d: the count must not stop at the sample bound", w.unattributed, sent)
+		}
+		if len(w.unattributedUsage) != maxUnattributedUsage {
+			t.Errorf("sample = %d entries, want it capped at %d", len(w.unattributedUsage), maxUnattributedUsage)
+		}
+		if w.usageSeen != sent {
+			t.Errorf("usageSeen = %d, want every report counted on receipt", w.usageSeen)
+		}
+	})
+}

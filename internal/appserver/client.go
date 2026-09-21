@@ -420,12 +420,12 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		}
 		final = w.result()
 	}
-	if n := len(final.unattributedUsage); n > 0 {
+	if n := final.unattributed; n > 0 {
 		// Named because the ids are the diagnosis: a report attributed to
 		// another turn means the filter is wrong, not that the server is
 		// silent.
 		cl.log.Warn("app-server: token usage reported for another turn", "thread", threadID, "turn", resp.Turn.ID,
-			"count", n, "reported_for", final.unattributedUsage)
+			"count", n, "sample", final.unattributedUsage)
 	}
 	if final.usage == nil && final.status == turnStatusCompleted {
 		// Deliberately not "the app-server reported none": nothing here
@@ -434,7 +434,7 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 		// any arrived at all.
 		cl.log.Info("no usable token usage observed before the cutoff", "thread", threadID, "turn", resp.Turn.ID,
 			"waited", UsageGrace, "reports_received", final.usageSeen, "refused_malformed", final.badUsage,
-			"for_another_turn", len(final.unattributedUsage))
+			"for_another_turn", final.unattributed)
 	}
 	if final.badUsage > 0 {
 		// Not a review warning: the verdict is unaffected and the calling
@@ -533,9 +533,11 @@ type turnWatcher struct {
 	// usageSeen counts usage notifications received, before any filtering.
 	usageSeen int
 	badUsage  int
-	// unattributedUsage records the thread and turn of each usage report
-	// that could not be attributed to this turn, bounded so a chatty or
-	// hostile server cannot grow it without limit.
+	// unattributed counts every usage report that could not be attributed
+	// to this turn; unattributedUsage samples their thread and turn,
+	// bounded so a chatty or hostile server cannot grow a log line
+	// without limit.
+	unattributed      int
 	unattributedUsage []string
 	done              chan struct{}
 	finished          bool
@@ -545,10 +547,11 @@ type turnWatcher struct {
 const maxUnattributedUsage = 4
 
 // UsageGrace is how long Review holds the window open after a turn
-// completes, for usage reports that trail it. Reviews take minutes, so a
-// fixed wait is immaterial; without it a report sent just after
-// turn/completed is missed entirely, which is what made every live review
-// record no usage at all.
+// completes, for usage reports that trail it. The app-server documentation
+// guarantees no ordering between a turn's completion and its usage report,
+// so both are accommodated; reviews take minutes, which makes a fixed wait
+// immaterial. It is not evidence that reports arrive late: see
+// docs/design/usage-ledger.md for what the live run actually found.
 const UsageGrace = 500 * time.Millisecond
 
 func newTurnWatcher(threadID string) *turnWatcher {
@@ -627,11 +630,26 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 			w.badUsage++
 			return
 		}
+		// The schema requires threadId and turnId, so a report without
+		// them is malformed rather than meant for another turn. Checked
+		// before the mismatch branch, which would otherwise file missing
+		// ids under the wrong diagnostic and describe them as belonging
+		// to a turn they never named.
+		if n.ThreadID == "" || n.TurnID == "" {
+			w.badUsage++
+			return
+		}
 		if !w.matches(n.ThreadID, n.TurnID) {
 			// Counted and reported rather than dropped in silence: a
 			// usage report this cannot attribute is indistinguishable
 			// from one never sent, and telling those apart is the whole
 			// diagnosis when no usage is recorded.
+			//
+			// The count is separate from the sample: the slice is capped
+			// so untrusted ids cannot grow a log line without bound, and
+			// reporting its length as the count would understate the
+			// condition past the cap.
+			w.unattributed++
 			if len(w.unattributedUsage) < maxUnattributedUsage {
 				w.unattributedUsage = append(w.unattributedUsage, n.ThreadID+"/"+n.TurnID)
 			}
@@ -696,6 +714,7 @@ type turnResult struct {
 	usage             *Usage
 	usageSeen         int
 	badUsage          int
+	unattributed      int
 	unattributedUsage []string
 }
 
@@ -713,6 +732,7 @@ func (w *turnWatcher) result() turnResult {
 		usage:             w.usage,
 		usageSeen:         w.usageSeen,
 		badUsage:          w.badUsage,
+		unattributed:      w.unattributed,
 		unattributedUsage: w.unattributedUsage,
 	}
 }

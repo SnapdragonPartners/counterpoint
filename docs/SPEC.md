@@ -752,8 +752,8 @@ ordering; no live run has ever delivered a report to either side of it. The whol
 rather than stopping at the first report, because a turn may report more
 than once and the last report is the one that stands. Half a second is a
 heuristic against a call that takes minutes, not a bound the protocol
-defines; a report arriving later than that is missed, and the log says the
-turn reported none. Usage notifications are counted on receipt, before
+defines; a report arriving later than that is missed, and the log then says
+no usable report was observed before the cutoff. Usage notifications are counted on receipt, before
 any filtering, and a report that cannot be attributed to the turn is
 logged with the thread and turn it named, so a report that was sent but
 filtered is distinguishable from one never sent. When a completed turn
