@@ -428,7 +428,13 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 			"count", n, "reported_for", final.unattributedUsage)
 	}
 	if final.usage == nil && final.status == turnStatusCompleted {
-		cl.log.Info("app-server reported no token usage for the turn", "thread", threadID, "turn", resp.Turn.ID, "waited", UsageGrace)
+		// Deliberately not "the app-server reported none": nothing here
+		// establishes that. What is known is that no usable report was
+		// observed before the window closed, and the counts say whether
+		// any arrived at all.
+		cl.log.Info("no usable token usage observed before the cutoff", "thread", threadID, "turn", resp.Turn.ID,
+			"waited", UsageGrace, "reports_received", final.usageSeen, "refused_malformed", final.badUsage,
+			"for_another_turn", len(final.unattributedUsage))
 	}
 	if final.badUsage > 0 {
 		// Not a review warning: the verdict is unaffected and the calling
@@ -524,7 +530,9 @@ type turnWatcher struct {
 	turnErr  *turnError
 	lastErr  *turnError
 	usage    *Usage
-	badUsage int
+	// usageSeen counts usage notifications received, before any filtering.
+	usageSeen int
+	badUsage  int
 	// unattributedUsage records the thread and turn of each usage report
 	// that could not be attributed to this turn, bounded so a chatty or
 	// hostile server cannot grow it without limit.
@@ -597,18 +605,7 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 		}
 	case notifyItemCompleted:
 		var n itemNotification
-		if !unmarshal(params, &n) {
-			w.badUsage++
-			return
-		}
-		if !w.matches(n.ThreadID, n.TurnID) {
-			// Counted and reported rather than dropped in silence: a
-			// usage report this cannot attribute is indistinguishable
-			// from one never sent, and telling those apart is the whole
-			// diagnosis when no usage is recorded.
-			if len(w.unattributedUsage) < maxUnattributedUsage {
-				w.unattributedUsage = append(w.unattributedUsage, n.ThreadID+"/"+n.TurnID)
-			}
+		if !unmarshal(params, &n) || !w.matches(n.ThreadID, n.TurnID) {
 			return
 		}
 		switch n.Item.Type {
@@ -621,6 +618,10 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 			w.append(&w.messages, n.Item.Text)
 		}
 	case notifyTokenUsage:
+		// Counted before any filtering, so "no usage recorded" can be
+		// told apart from "no usage report ever arrived". Every branch
+		// below discards a report that this has already counted.
+		w.usageSeen++
 		var n tokenUsageNotification
 		if !unmarshal(params, &n) {
 			w.badUsage++
@@ -693,6 +694,7 @@ type turnResult struct {
 	turnErr           *turnError
 	lastErr           *turnError
 	usage             *Usage
+	usageSeen         int
 	badUsage          int
 	unattributedUsage []string
 }
@@ -709,6 +711,7 @@ func (w *turnWatcher) result() turnResult {
 		turnErr:           w.turnErr,
 		lastErr:           w.lastErr,
 		usage:             w.usage,
+		usageSeen:         w.usageSeen,
 		badUsage:          w.badUsage,
 		unattributedUsage: w.unattributedUsage,
 	}

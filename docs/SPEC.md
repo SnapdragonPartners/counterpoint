@@ -708,9 +708,14 @@ rather than stopping at the first report, because a turn may report more
 than once and the last report is the one that stands. Half a second is a
 heuristic against a call that takes minutes, not a bound the protocol
 defines; a report arriving later than that is missed, and the log says the
-turn reported none. A report that cannot be attributed to the turn is
+turn reported none. Usage notifications are counted on receipt, before
+any filtering, and a report that cannot be attributed to the turn is
 logged with the thread and turn it named, so a report that was sent but
-filtered is distinguishable from one never sent. The two failure modes this prevents are a turn the
+filtered is distinguishable from one never sent. When a completed turn
+yields no usable figure the log says so in those terms: no usable report
+was observed before the cutoff, with the counts of reports received,
+refused, and attributed elsewhere. It does not say the server reported
+none, which is a claim about the server that Counterpoint cannot make. The two failure modes this prevents are a turn the
 app-server said nothing about being recorded as a turn that cost nothing,
 and a negative counter being persisted, which would make every later round
 of that workflow fail the load-time validation enforcing the same rule,

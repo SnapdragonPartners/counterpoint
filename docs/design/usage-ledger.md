@@ -178,16 +178,25 @@ refused as malformed, and `dispatch` passes every notification to every
 subscriber. The method string is present in `codex-cli 0.153.1`, so the
 server can emit it.
 
-The cause was in this code. `turnWatcher.handle` dropped every notification
-once `turn/completed` set `finished`, and a turn's final usage is naturally
-reported at or after its completion. `Review` also returned as soon as the
-turn finished, so even an accepted report could arrive after the result had
-been read.
+A cause was found in this code, and it is a real defect whether or not it
+is *the* live cause. `turnWatcher.handle` dropped every notification once
+`turn/completed` set `finished`, and `Review` returned as soon as the turn
+finished, so a report arriving at or after the completion was discarded
+either way.
 
 The tests did not catch it because the fake reported usage *before* the
 completion. That ordering was my assumption, encoded into the fake and then
 verified against itself. Moving the fake's report to after the completion
-reproduces the live symptom exactly: nothing recorded.
+reproduces the live symptom.
+
+What that does **not** establish is what happened in the live run. It shows
+a report arriving after completion would have been dropped; it does not
+show that one arrived. The app-server documentation names both events and
+guarantees no ordering between them, so "usage is reported after the
+completion" is an assumption, not a fact. Only an instrumented live round
+can trace a received event through to a persisted figure, and the counters
+below exist to make that round conclusive rather than another explanation
+resting on a revised fake.
 
 The fix keeps accepting usage for a finished turn, which no other
 notification may revise, and holds the window open for `UsageGrace` after
@@ -202,9 +211,19 @@ the window to zero fails it. Without that scenario the window was not
 load-bearing in any test, so the first version of this fix had a core
 mechanism no test could fail for.
 
-Whether real Codex reports before, after, or not at all is still not
-established. The unattributed-report log line exists so the next live round
-distinguishes a report that was sent and filtered from one never sent.
+Usage notifications are counted on receipt, before any filtering, and the
+count is logged with the refusal and misattribution counts beside it. The
+line says no usable report was observed before the cutoff rather than that
+the server reported none, because the second is a claim about the server
+that nothing here supports.
+
+A first version of these diagnostics counted `item/completed` notifications
+as usage reports. The guard being edited appears in both handlers and the
+edit replaced every occurrence, so the `no-usage` scenario logged usage
+reports for a turn that sent none: a diagnostic that manufactured the
+evidence it existed to gather. Both reviewers found it. The scenario now
+asserts that no usage notification means no usage counted, and that a
+filtered report is still counted as received.
 
 ## Rejected alternatives
 

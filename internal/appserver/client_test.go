@@ -910,11 +910,38 @@ func TestReviewRecordsTokenUsage(t *testing.T) {
 			if scenario == "" {
 				scenario = "normal"
 			}
-			cl, _ := fakeClient(t, scenario, "")
+			cl, logs := fakeClient(t, scenario, "")
 			th := startThread(t, cl)
 			rev, err := cl.Review(context.Background(), th.ID, "instructions")
 			if err != nil {
 				t.Fatalf("Review: %v", err)
+			}
+			// A scenario that sends no usage notification must leave
+			// every usage counter untouched. The item and message noise
+			// these scenarios emit shares the watcher's attribution
+			// guard, and a diagnostic that counts it reports usage
+			// reports that were never sent.
+			// A report that arrives and is filtered must still be
+			// counted as received, and named. Counting only accepted
+			// reports would make "sent but filtered" look identical to
+			// "never sent", which is the distinction these lines exist
+			// to draw.
+			if tc.scenario == "usage-other-turn" {
+				got := logs.String()
+				if !strings.Contains(got, "reports_received=1") {
+					t.Errorf("a filtered report was not counted as received:\n%s", got)
+				}
+				if !strings.Contains(got, "for_another_turn=1") || !strings.Contains(got, "token usage reported for another turn") {
+					t.Errorf("a filtered report was not named as such:\n%s", got)
+				}
+			}
+			if tc.scenario == "no-usage" {
+				if got := logs.String(); strings.Contains(got, "token usage reported for another turn") {
+					t.Errorf("item noise was counted as a usage report:\n%s", got)
+				}
+				if got := logs.String(); !strings.Contains(got, "reports_received=0") {
+					t.Errorf("a scenario that sent no usage did not report zero receipts:\n%s", got)
+				}
 			}
 			switch {
 			case tc.want == nil && rev.Usage != nil:
