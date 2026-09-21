@@ -697,7 +697,20 @@ within it, and, in each breakdown, `inputTokens`, `cachedInputTokens`,
 an absent one is its documented zero. No counter may be negative.
 
 A report failing any of these is refused, and an earlier valid report for
-the same turn stands. The two failure modes this prevents are a turn the
+the same turn stands.
+
+A turn's usage may be reported before its completion or after it, and the
+completion itself carries none. Counterpoint therefore keeps accepting
+usage for a turn that has finished, which no other notification is allowed
+to revise, and holds the window open for half a second after the
+completion before reading the turn's usage. The whole window is waited out
+rather than stopping at the first report, because a turn may report more
+than once and the last report is the one that stands. Half a second is a
+heuristic against a call that takes minutes, not a bound the protocol
+defines; a report arriving later than that is missed, and the log says the
+turn reported none. A report that cannot be attributed to the turn is
+logged with the thread and turn it named, so a report that was sent but
+filtered is distinguishable from one never sent. The two failure modes this prevents are a turn the
 app-server said nothing about being recorded as a turn that cost nothing,
 and a negative counter being persisted, which would make every later round
 of that workflow fail the load-time validation enforcing the same rule,

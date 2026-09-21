@@ -404,6 +404,32 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 	}
 
 	final := w.result()
+	// A usage report that trails the turn's completion arrives on the
+	// reader goroutine after this one was woken, so the window is held
+	// open briefly before the turn's usage is read.
+	//
+	// The whole window is waited out rather than stopping at the first
+	// report, because a turn may report more than once and the last
+	// report is the turn's standing figure: returning on the first would
+	// take a superseded one. The cost is a fixed delay on a call that
+	// takes minutes.
+	if final.status == turnStatusCompleted {
+		select {
+		case <-time.After(UsageGrace):
+		case <-cl.c.closed:
+		}
+		final = w.result()
+	}
+	if n := len(final.unattributedUsage); n > 0 {
+		// Named because the ids are the diagnosis: a report attributed to
+		// another turn means the filter is wrong, not that the server is
+		// silent.
+		cl.log.Warn("app-server: token usage reported for another turn", "thread", threadID, "turn", resp.Turn.ID,
+			"count", n, "reported_for", final.unattributedUsage)
+	}
+	if final.usage == nil && final.status == turnStatusCompleted {
+		cl.log.Info("app-server reported no token usage for the turn", "thread", threadID, "turn", resp.Turn.ID, "waited", UsageGrace)
+	}
 	if final.badUsage > 0 {
 		// Not a review warning: the verdict is unaffected and the calling
 		// agent can do nothing about it.
@@ -499,9 +525,23 @@ type turnWatcher struct {
 	lastErr  *turnError
 	usage    *Usage
 	badUsage int
-	done     chan struct{}
-	finished bool
+	// unattributedUsage records the thread and turn of each usage report
+	// that could not be attributed to this turn, bounded so a chatty or
+	// hostile server cannot grow it without limit.
+	unattributedUsage []string
+	done              chan struct{}
+	finished          bool
 }
+
+// maxUnattributedUsage bounds what is kept for the warning.
+const maxUnattributedUsage = 4
+
+// UsageGrace is how long Review holds the window open after a turn
+// completes, for usage reports that trail it. Reviews take minutes, so a
+// fixed wait is immaterial; without it a report sent just after
+// turn/completed is missed entirely, which is what made every live review
+// record no usage at all.
+const UsageGrace = 500 * time.Millisecond
 
 func newTurnWatcher(threadID string) *turnWatcher {
 	return &turnWatcher{threadID: threadID, done: make(chan struct{})}
@@ -537,7 +577,11 @@ func (w *turnWatcher) matches(threadID, turnID string) bool {
 func (w *turnWatcher) handle(method string, params json.RawMessage) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.finished {
+	// A turn's final token usage is naturally reported with, or just
+	// after, the completion that ends the turn, so usage stays accepted
+	// once the turn has finished. Everything else is terminal state that
+	// a late message must not revise.
+	if w.finished && method != notifyTokenUsage {
 		return
 	}
 	switch method {
@@ -553,7 +597,18 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 		}
 	case notifyItemCompleted:
 		var n itemNotification
-		if !unmarshal(params, &n) || !w.matches(n.ThreadID, n.TurnID) {
+		if !unmarshal(params, &n) {
+			w.badUsage++
+			return
+		}
+		if !w.matches(n.ThreadID, n.TurnID) {
+			// Counted and reported rather than dropped in silence: a
+			// usage report this cannot attribute is indistinguishable
+			// from one never sent, and telling those apart is the whole
+			// diagnosis when no usage is recorded.
+			if len(w.unattributedUsage) < maxUnattributedUsage {
+				w.unattributedUsage = append(w.unattributedUsage, n.ThreadID+"/"+n.TurnID)
+			}
 			return
 		}
 		switch n.Item.Type {
@@ -567,7 +622,18 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 		}
 	case notifyTokenUsage:
 		var n tokenUsageNotification
-		if !unmarshal(params, &n) || !w.matches(n.ThreadID, n.TurnID) {
+		if !unmarshal(params, &n) {
+			w.badUsage++
+			return
+		}
+		if !w.matches(n.ThreadID, n.TurnID) {
+			// Counted and reported rather than dropped in silence: a
+			// usage report this cannot attribute is indistinguishable
+			// from one never sent, and telling those apart is the whole
+			// diagnosis when no usage is recorded.
+			if len(w.unattributedUsage) < maxUnattributedUsage {
+				w.unattributedUsage = append(w.unattributedUsage, n.ThreadID+"/"+n.TurnID)
+			}
 			return
 		}
 		// Untrusted child output. A report missing any required field, or
@@ -619,30 +685,32 @@ func (w *turnWatcher) append(b *strings.Builder, s string) {
 
 // turnResult is a snapshot taken after the turn finished.
 type turnResult struct {
-	status   string
-	review   string
-	messages string
-	deltas   string
-	overflow bool
-	turnErr  *turnError
-	lastErr  *turnError
-	usage    *Usage
-	badUsage int
+	status            string
+	review            string
+	messages          string
+	deltas            string
+	overflow          bool
+	turnErr           *turnError
+	lastErr           *turnError
+	usage             *Usage
+	badUsage          int
+	unattributedUsage []string
 }
 
 func (w *turnWatcher) result() turnResult {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return turnResult{
-		status:   w.status,
-		review:   w.review,
-		messages: w.messages.String(),
-		deltas:   w.deltas.String(),
-		overflow: w.overflow,
-		turnErr:  w.turnErr,
-		lastErr:  w.lastErr,
-		usage:    w.usage,
-		badUsage: w.badUsage,
+		status:            w.status,
+		review:            w.review,
+		messages:          w.messages.String(),
+		deltas:            w.deltas.String(),
+		overflow:          w.overflow,
+		turnErr:           w.turnErr,
+		lastErr:           w.lastErr,
+		usage:             w.usage,
+		badUsage:          w.badUsage,
+		unattributedUsage: w.unattributedUsage,
 	}
 }
 

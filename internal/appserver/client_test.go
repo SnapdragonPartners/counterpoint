@@ -887,6 +887,17 @@ func TestReviewRecordsTokenUsage(t *testing.T) {
 			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
 			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
 		}},
+		// The same report sent before the completion instead of after it.
+		{"usage-before-completion", &Usage{
+			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
+			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
+		}},
+		// Reported well after the completion: only the window the client
+		// holds open catches this one.
+		{"usage-late", &Usage{
+			Last:  UsageBreakdown{Input: 2000, Cached: 1000, CacheWrite: 500, Output: 400, Reasoning: 200, Total: 2000},
+			Total: UsageBreakdown{Input: 9000, Cached: 4500, CacheWrite: 2250, Output: 1800, Reasoning: 900, Total: 9000},
+		}},
 		{"usage-other-turn", nil},
 		{"no-usage", nil},
 	} {

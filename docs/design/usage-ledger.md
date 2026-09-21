@@ -170,6 +170,42 @@ total as reported, and per-round spend where consecutive snapshots survive.
 The output states that it counts completed rounds only, so the figure is
 never mistaken for the whole bill.
 
+## Amendment, 2026-09-21: nothing was recorded against real Codex
+
+The first live round after installing recorded no usage at all. The logs
+ruled out the obvious causes: the new binary was running, no report was
+refused as malformed, and `dispatch` passes every notification to every
+subscriber. The method string is present in `codex-cli 0.153.1`, so the
+server can emit it.
+
+The cause was in this code. `turnWatcher.handle` dropped every notification
+once `turn/completed` set `finished`, and a turn's final usage is naturally
+reported at or after its completion. `Review` also returned as soon as the
+turn finished, so even an accepted report could arrive after the result had
+been read.
+
+The tests did not catch it because the fake reported usage *before* the
+completion. That ordering was my assumption, encoded into the fake and then
+verified against itself. Moving the fake's report to after the completion
+reproduces the live symptom exactly: nothing recorded.
+
+The fix keeps accepting usage for a finished turn, which no other
+notification may revise, and holds the window open for `UsageGrace` after
+the completion. The whole window is waited out rather than returning on the
+first report, since a turn may report more than once and the last one
+stands; returning early took a superseded figure, which the
+`usage-superseded` scenario caught.
+
+`UsageGrace` is a heuristic, not a protocol bound, and the tests now pin it:
+the `usage-late` scenario reports 150 ms after the completion, and setting
+the window to zero fails it. Without that scenario the window was not
+load-bearing in any test, so the first version of this fix had a core
+mechanism no test could fail for.
+
+Whether real Codex reports before, after, or not at all is still not
+established. The unattributed-report log line exists so the next live round
+distinguishes a report that was sent and filtered from one never sent.
+
 ## Rejected alternatives
 
 **A separate append-only ledger file.** Survives eviction and keeps the state
