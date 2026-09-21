@@ -82,6 +82,13 @@ gives up: per-round detail dies with the records, the branch's lifetime total
 does not. Per-round spend is shown as the difference between consecutive
 snapshots wherever both are retained.
 
+The report never presents either breakdown as a measured cost: a `last`
+value is labelled a last report, their sum is labelled a sum of last reports
+and stated to be a lower bound, and a `total` is labelled as the thread
+total reported at that round. Round 1 of review labelled and summed `last`
+as whole-round spend, which asserted the very scope this section leaves
+open.
+
 **This rests on an unverified protocol claim** — that `total` accumulates
 across resumed rounds of the same thread — and no automated test can settle
 it, because the fake app-server answers whatever it is told to. It needs one
@@ -91,8 +98,24 @@ fact, and the limitation is recorded in `docs/SPEC.md`.
 
 ### Validation
 
-Usage is untrusted file content like the rest of the state. `InvalidHistory`
-gains checks that no counter is negative. The relationships between counters
+Usage arrives as child-process output and is validated where it enters, not
+only where it is read back. A notification with no `tokenUsage` object, or
+with it null, is refused: decoding it into a value type would record zeros
+where the app-server reported nothing, and absent must stay unknown. A
+notification with a negative counter is refused, because persisting one
+makes every later round of the workflow fail the load-time check and leaves
+it recoverable only by hand-editing the state file. Refusals are counted and
+logged once per turn rather than surfaced as review warnings: the verdict is
+unaffected and the calling agent can do nothing about it.
+
+The same check runs again where usage is converted for saving, so a Reviewer
+other than the app-server client cannot write a record the loader rejects.
+The round's telemetry is worth less than the workflow, so unusable usage is
+dropped and logged rather than failing a review that has already been paid
+for.
+
+Usage is also untrusted file content like the rest of the state.
+`InvalidHistory` gains checks that no counter is negative. The relationships between counters
 are deliberately not validated: which of cached, reasoning, and cache-write
 tokens are subsets of which totals varies by model, and a rule invented here
 would reject valid files from a model that reports differently.

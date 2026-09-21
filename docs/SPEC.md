@@ -681,13 +681,27 @@ default.
 
 ## Token usage
 
-Counterpoint records what each completed round cost. The app-server reports
-usage in `thread/tokenUsage/updated`, carrying a `last` breakdown and a
-`total` one; both are kept, in `last_usage` on the workflow for the newest
-round and in `usage` on a history record for a retained earlier round. The
-counters are input, cached input, cache writes, output, reasoning output,
-and the total. Only non-negativity is validated: which counters are subsets
-of which varies by model, so a relationship rule would reject valid files.
+Counterpoint records what the app-server reported for each completed round.
+The report arrives in `thread/tokenUsage/updated`, carrying a `last`
+breakdown and a `total` one; both are kept, in `last_usage` on the workflow
+for the newest round and in `usage` on a history record for a retained
+earlier round. The counters are input, cached input, cache writes, output,
+reasoning output, and the total.
+
+The notification is child-process output and is validated as untrusted
+input before it is accepted. A notification with no `tokenUsage` object, or
+with `tokenUsage` null, is refused rather than recorded as zeros: the
+app-server said nothing, and nothing must stay unknown. A notification with
+any negative counter is refused, because persisting one would make every
+later round of that workflow fail the load-time validation that the same
+rule enforces, leaving the workflow recoverable only by hand-editing the
+state file. Refusals are counted and logged once per turn; they do not
+affect the verdict and are not review warnings. Usage that would not
+validate is also dropped at the point of saving, so no path can write a
+record the loader will reject.
+
+Only non-negativity is validated. Which counters are subsets of which varies
+by model, so a relationship rule would reject valid files.
 
 Usage is not returned to the calling agent. The review tool's result is the
 reviewer's verdict; usage goes to the log line and to `counterpoint
@@ -710,13 +724,25 @@ Three limits are deliberate and are stated in the report:
 - **Absent is unknown, not zero.** A round reviewed before usage was
   tracked, or whose app-server reported none, prints as not recorded.
 
-The `total` breakdown is cumulative for the thread as the app-server
-reports it, and Counterpoint resumes one thread per workflow across rounds,
-so the newest round's total is taken to be the branch's lifetime spend. The
-app-server schema does not document the scope of either breakdown, and no
-automated test can settle it, because the fake answers whatever it is told
-to. Until a live run confirms it the report labels the figure as reported
-by the app-server rather than as established.
+The app-server schema does not document the scope of either breakdown, and
+no automated test can settle it, because the fake answers whatever it is
+told to. Counterpoint therefore reports what it was given and asserts
+nothing about it:
+
+- A `last` breakdown is shown per round as a last report, never as the
+  round's cost. If a last report covers only the final model request of a
+  turn rather than the whole turn, earlier requests are absent from it.
+- Their sum is shown as a sum of last reports and stated to be a lower
+  bound, never a round-by-round cost.
+- A `total` breakdown is shown as the thread total reported at that round.
+  Counterpoint resumes one thread per workflow across rounds, so if `total`
+  is cumulative for the thread then the newest round's total is the
+  branch's lifetime spend and is the one figure that survives eviction of
+  the per-round detail. That conditional is the claim; the report does not
+  make it for the reader.
+
+One live run would settle both scopes and let the report state a measured
+cost. Until then the labels are the contract.
 
 Tokens are reported, never money. The protocol carries no pricing, and a
 hardcoded rate table would go stale silently and be wrong for any user on a

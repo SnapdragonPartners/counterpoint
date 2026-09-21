@@ -502,7 +502,7 @@ func (s *Service) review(ctx context.Context, req Request) (*Result, error) {
 
 	done := state.Workflow{
 		ThreadID:        thread.ID,
-		LastUsage:       usageFrom(rev.Usage),
+		LastUsage:       usageFrom(rev.Usage, s.log, requestID, key),
 		LastCommit:      target.Commit,
 		LastBase:        target.Base,
 		LastRequestHash: hash,
@@ -667,12 +667,25 @@ func (s *Service) saveEvictingHistory(ctx context.Context, st *state.State, key,
 }
 
 // usageFrom converts the app-server's report to the persisted shape, or
-// returns nil when the turn reported none.
-func usageFrom(u *appserver.Usage) *state.Usage {
+// returns nil when the turn reported none or reported something the state
+// file would refuse.
+//
+// The appserver boundary already refuses malformed counters, so reaching
+// the second case means a Reviewer that is not the app-server client. It is
+// still checked here, because persisting usage that load-time validation
+// rejects would fail every later round of the workflow: the round's
+// telemetry is worth less than the workflow, so it is dropped and logged
+// rather than carried into the save.
+func usageFrom(u *appserver.Usage, log *slog.Logger, requestID, key string) *state.Usage {
 	if u == nil {
 		return nil
 	}
-	return &state.Usage{Last: usageBreakdown(u.Last), Total: usageBreakdown(u.Total)}
+	out := &state.Usage{Last: usageBreakdown(u.Last), Total: usageBreakdown(u.Total)}
+	if bad := out.Invalid(); bad != "" {
+		log.Warn("dropping unusable token usage for this round", "request", requestID, "workflow", key, "defect", bad)
+		return nil
+	}
+	return out
 }
 
 func usageBreakdown(b appserver.UsageBreakdown) state.UsageBreakdown {

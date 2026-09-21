@@ -54,6 +54,7 @@ type fakeReviewer struct {
 	reviewText     string // when set, the review text returned instead of the derived one
 	turns          int
 	noUsage        bool
+	forceUsage     *appserver.Usage
 }
 
 func (f *fakeReviewer) StartThread(ctx context.Context, cwd string, sb appserver.Sandbox) (appserver.Thread, error) {
@@ -166,6 +167,9 @@ func (f *fakeReviewer) Review(ctx context.Context, threadID, instructions string
 	}
 	if f.noUsage {
 		u = nil
+	}
+	if f.forceUsage != nil {
+		u = f.forceUsage
 	}
 	f.mu.Unlock()
 	return &appserver.Review{TurnID: "turn_1", Text: text, Warnings: warnings, Usage: u}, nil
@@ -1944,5 +1948,34 @@ func TestNoReportedUsageIsStoredAsAbsent(t *testing.T) {
 	wf, _ := loadState(t, h.store).Get(h.key(t))
 	if wf.LastUsage != nil {
 		t.Errorf("LastUsage = %+v, want nil when the app-server reported none", wf.LastUsage)
+	}
+}
+
+// Usage that the state file's load-time validation would reject is dropped
+// before the save. Persisting it would wedge the workflow: every later
+// round fails on the stored record, and only hand-editing the state file
+// recovers. The round's telemetry is worth less than the workflow.
+func TestUnusableUsageIsDroppedRatherThanPersisted(t *testing.T) {
+	h := newHarness(t)
+	h.reviewer.forceUsage = &appserver.Usage{
+		Last:  appserver.UsageBreakdown{Input: -1, Total: -1},
+		Total: appserver.UsageBreakdown{Total: -1},
+	}
+	first := h.repo.git("rev-parse", "HEAD")
+	if _, err := h.svc.Review(context.Background(), h.request(first, "r1")); err != nil {
+		t.Fatalf("round one: %v", err)
+	}
+	wf, _ := loadState(t, h.store).Get(h.key(t))
+	if wf.LastUsage != nil {
+		t.Errorf("stored unusable usage %+v, want it dropped", wf.LastUsage)
+	}
+	if bad := wf.InvalidHistory(); bad != "" {
+		t.Errorf("stored workflow does not validate: %s", bad)
+	}
+
+	// The next round still works, which is the point.
+	second := h.repo.commit("feature-2")
+	if _, err := h.svc.Review(context.Background(), h.request(second, "r2")); err != nil {
+		t.Fatalf("round two after unusable usage: %v", err)
 	}
 }

@@ -37,15 +37,23 @@ func TestWriteUsageReportsRecordedRounds(t *testing.T) {
 		"Completed rounds only",
 		"/repo/.git::refs/heads/b",
 		"round 3",
-		"22,644 tokens",
+		"last report 22,644 tokens",
 		"round 2",
-		"19,100 tokens",
+		"last report 19,100 tokens",
 		// A round recorded before usage was tracked is unknown, not zero.
 		"round 1",
 		"not recorded",
-		"thread total as reported by the app-server: 61,744",
+		"thread total reported at round 3: 61,744",
 		// Only the two recorded rounds are summed.
-		"41,744 tokens across 2 recorded round(s)",
+		"2 recorded round(s)",
+		"Sum of last reports: 41,744 tokens",
+		// The sum must not be presented as a measured round cost: the
+		// scope of a last report is not established, so the caveat is
+		// part of the contract, not decoration.
+		"may cover only the final model request",
+		"lower",
+		"not as measured round costs",
+		"not a cost Counterpoint measured",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q:\n%s", want, got)

@@ -18,10 +18,16 @@ import (
 // a floor on what was spent, not the whole bill. Rounds reviewed before
 // usage was tracked, or whose app-server reported none, print as not
 // recorded rather than as zero.
+//
+// Figures are labelled as the app-server reported them and never as a cost
+// this measured. The schema does not define whether a last report covers a
+// whole turn or only its final model request, so a per-round cost derived
+// from one would assert something unestablished.
 func writeUsage(w io.Writer, st *state.State, path string) error {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "Counterpoint token usage from %s\n", path)
 	b.WriteString("Completed rounds only; failed and interrupted rounds are not recorded.\n")
+	b.WriteString("Every figure is what the app-server reported, not a cost Counterpoint measured.\n")
 
 	keys := make([]string, 0, len(st.Workflows))
 	for k := range st.Workflows {
@@ -29,33 +35,42 @@ func writeUsage(w io.Writer, st *state.State, path string) error {
 	}
 	sort.Strings(keys)
 
-	var grand int64
+	var sum int64
 	var recorded int
 	for _, k := range keys {
 		wf := st.Workflows[k]
 		fmt.Fprintf(b, "\n%s\n", k)
 		for _, r := range rounds(wf) {
-			switch {
-			case r.usage == nil:
+			if r.usage == nil {
 				fmt.Fprintf(b, "  round %-4d %s  not recorded\n", r.round, short(r.commit))
-			default:
-				l := r.usage.Last
-				grand += l.Total
-				recorded++
-				fmt.Fprintf(b, "  round %-4d %s  %s tokens  (input %s, cached %s, output %s, reasoning %s)\n",
-					r.round, short(r.commit), group(l.Total), group(l.Input), group(l.Cached), group(l.Output), group(l.Reasoning))
+				continue
 			}
+			l := r.usage.Last
+			sum += l.Total
+			recorded++
+			fmt.Fprintf(b, "  round %-4d %s  last report %s tokens  (input %s, cached %s, output %s, reasoning %s)\n",
+				r.round, short(r.commit), group(l.Total), group(l.Input), group(l.Cached), group(l.Output), group(l.Reasoning))
 		}
 		if wf.LastUsage != nil {
-			fmt.Fprintf(b, "  thread total as reported by the app-server: %s tokens\n", group(wf.LastUsage.Total.Total))
+			fmt.Fprintf(b, "  thread total reported at round %d: %s tokens\n", wf.Round, group(wf.LastUsage.Total.Total))
 		}
 	}
 
 	if len(keys) == 0 {
 		b.WriteString("\nNo workflows recorded yet.\n")
-	} else {
-		fmt.Fprintf(b, "\n%d workflow(s); %s tokens across %d recorded round(s).\n", len(keys), group(grand), recorded)
+		_, err := io.WriteString(w, b.String())
+		return err
 	}
+
+	fmt.Fprintf(b, "\n%d workflow(s), %d recorded round(s).\n", len(keys), recorded)
+	fmt.Fprintf(b, "Sum of last reports: %s tokens.\n", group(sum))
+	// The app-server schema does not say whether a last report covers a
+	// whole turn or only its final model request. Presenting the sum as
+	// round-by-round cost would assert the first; saying so would be a
+	// claim this has not established.
+	b.WriteString("A last report may cover only the final model request of a turn rather than\n")
+	b.WriteString("the whole turn, so treat these as reported figures and the sum as a lower\n")
+	b.WriteString("bound, not as measured round costs.\n")
 	_, err := io.WriteString(w, b.String())
 	return err
 }

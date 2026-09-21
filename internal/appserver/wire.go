@@ -223,10 +223,22 @@ type agentMessageDelta struct {
 type tokenUsageNotification struct {
 	ThreadID string `json:"threadId"`
 	TurnID   string `json:"turnId"`
-	Usage    struct {
+	// Usage is a pointer so an absent or null tokenUsage is distinguishable
+	// from one reporting zeros: absent means the app-server said nothing,
+	// which must stay unknown rather than become a recorded zero.
+	Usage *struct {
 		Last  usageBreakdown `json:"last"`
 		Total usageBreakdown `json:"total"`
 	} `json:"tokenUsage"`
+}
+
+// negative reports whether any counter is below zero. Counts come from the
+// child process, which is untrusted: a negative counter persisted with the
+// round makes every later round of that workflow fail state validation, so
+// it is refused here rather than carried inward.
+func (b usageBreakdown) negative() bool {
+	return b.InputTokens < 0 || b.CachedInputTokens < 0 || b.CacheWriteInputTokens < 0 ||
+		b.OutputTokens < 0 || b.ReasoningOutputTokens < 0 || b.TotalTokens < 0
 }
 
 // usageBreakdown is TokenUsageBreakdown from the app-server schema.

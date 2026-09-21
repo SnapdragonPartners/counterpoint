@@ -402,6 +402,11 @@ func (cl *Client) Review(ctx context.Context, threadID, instructions string) (*R
 	}
 
 	final := w.result()
+	if final.badUsage > 0 {
+		// Not a review warning: the verdict is unaffected and the calling
+		// agent can do nothing about it.
+		cl.log.Warn("app-server: ignoring malformed token usage reports", "thread", threadID, "turn", resp.Turn.ID, "count", final.badUsage)
+	}
 	warnings := cl.c.takeWarnings()
 	switch final.status {
 	case turnStatusCompleted:
@@ -491,6 +496,7 @@ type turnWatcher struct {
 	turnErr  *turnError
 	lastErr  *turnError
 	usage    *Usage
+	badUsage int
 	done     chan struct{}
 	finished bool
 }
@@ -571,11 +577,21 @@ func (w *turnWatcher) handle(method string, params json.RawMessage) {
 		}
 	case notifyTokenUsage:
 		var n tokenUsageNotification
-		if unmarshal(params, &n) && w.matches(n.ThreadID, n.TurnID) {
-			// The app-server may report several times in a turn; the
-			// last report is the turn's standing figure.
-			w.usage = &Usage{Last: breakdown(n.Usage.Last), Total: breakdown(n.Usage.Total)}
+		if !unmarshal(params, &n) || !w.matches(n.ThreadID, n.TurnID) {
+			return
 		}
+		// Untrusted child output: a report with no usage object, or with a
+		// negative counter, is refused rather than recorded. Recording it
+		// would either invent a zero where nothing was reported or
+		// persist a counter that makes every later round of this workflow
+		// fail state validation.
+		if n.Usage == nil || n.Usage.Last.negative() || n.Usage.Total.negative() {
+			w.badUsage++
+			return
+		}
+		// The app-server may report several times in a turn; the last
+		// valid report is the turn's standing figure.
+		w.usage = &Usage{Last: breakdown(n.Usage.Last), Total: breakdown(n.Usage.Total)}
 	case notifyError:
 		var n errorNotification
 		if unmarshal(params, &n) && w.matches(n.ThreadID, n.TurnID) && !n.WillRetry {
@@ -622,6 +638,7 @@ type turnResult struct {
 	turnErr  *turnError
 	lastErr  *turnError
 	usage    *Usage
+	badUsage int
 }
 
 func (w *turnWatcher) result() turnResult {
@@ -636,6 +653,7 @@ func (w *turnWatcher) result() turnResult {
 		turnErr:  w.turnErr,
 		lastErr:  w.lastErr,
 		usage:    w.usage,
+		badUsage: w.badUsage,
 	}
 }
 

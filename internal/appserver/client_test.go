@@ -3,6 +3,7 @@ package appserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -913,5 +914,41 @@ func TestReviewRecordsTokenUsage(t *testing.T) {
 				t.Errorf("Usage = %+v, want %+v", *rev.Usage, *tc.want)
 			}
 		})
+	}
+}
+
+// Usage comes from the child process and is untrusted. A report with no
+// usage object must stay unknown rather than become a recorded zero, and a
+// negative counter must not be carried inward: persisted with the round it
+// makes every later round of that workflow fail state validation.
+func TestMalformedTokenUsageIsRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"absent":          `{"threadId":"t","turnId":"u"}`,
+		"null":            `{"threadId":"t","turnId":"u","tokenUsage":null}`,
+		"negative last":   `{"threadId":"t","turnId":"u","tokenUsage":{"last":{"totalTokens":-5},"total":{}}}`,
+		"negative total":  `{"threadId":"t","turnId":"u","tokenUsage":{"last":{},"total":{"inputTokens":-1}}}`,
+		"negative cached": `{"threadId":"t","turnId":"u","tokenUsage":{"last":{"cachedInputTokens":-1},"total":{}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newTurnWatcher("t")
+			w.setTurn("u")
+			w.handle(notifyTokenUsage, json.RawMessage(body))
+			if w.usage != nil {
+				t.Errorf("recorded %+v from %s", *w.usage, body)
+			}
+			if w.badUsage != 1 {
+				t.Errorf("badUsage = %d, want the refusal counted", w.badUsage)
+			}
+		})
+	}
+
+	// A valid report after a refused one still lands: one malformed
+	// message does not poison the turn's reporting.
+	w := newTurnWatcher("t")
+	w.setTurn("u")
+	w.handle(notifyTokenUsage, json.RawMessage(`{"threadId":"t","turnId":"u","tokenUsage":null}`))
+	w.handle(notifyTokenUsage, json.RawMessage(`{"threadId":"t","turnId":"u","tokenUsage":{"last":{"totalTokens":7},"total":{"totalTokens":9}}}`))
+	if w.usage == nil || w.usage.Last.Total != 7 || w.usage.Total.Total != 9 {
+		t.Errorf("usage after a refused report = %+v", w.usage)
 	}
 }

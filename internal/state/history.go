@@ -62,8 +62,9 @@ func (b UsageBreakdown) negativeCounter() string {
 	return ""
 }
 
-// invalid names the first way u breaks its invariants, or "" when it holds.
-func (u *Usage) invalid() string {
+// Invalid names the first way u breaks its invariants, or "" when it holds.
+// A nil Usage is valid: absent means unknown.
+func (u *Usage) Invalid() string {
 	if u == nil {
 		return ""
 	}
@@ -167,11 +168,11 @@ func (w Workflow) InvalidHistory() string {
 			return fmt.Sprintf("history record %d has an unknown omission reason", i)
 		case len(r.Review) > MaxHistoryRecordBytes:
 			return fmt.Sprintf("history record %d review is %d bytes, limit %d", i, len(r.Review), MaxHistoryRecordBytes)
-		case r.Usage.invalid() != "":
-			return fmt.Sprintf("history record %d has a negative usage counter: %s", i, r.Usage.invalid())
+		case r.Usage.Invalid() != "":
+			return fmt.Sprintf("history record %d has a negative usage counter: %s", i, r.Usage.Invalid())
 		}
 	}
-	if c := w.LastUsage.invalid(); c != "" {
+	if c := w.LastUsage.Invalid(); c != "" {
 		return fmt.Sprintf("the last review has a negative usage counter: %s", c)
 	}
 	newest := NewHistoryRecord(0, "", "", w.LastReview, nil).injectedBytes()
