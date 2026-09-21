@@ -264,18 +264,29 @@ func TestPrepareRejectsASymlinkedCache(t *testing.T) {
 	}
 }
 
-func TestDefaultRootHonorsTheOverride(t *testing.T) {
+func TestResolveRootPrecedence(t *testing.T) {
+	// The environment wins over a configured value.
+	t.Setenv(EnvRoot, "/abs/path")
+	if root, err := ResolveRoot("/from/config"); err != nil || root != "/abs/path" {
+		t.Errorf("ResolveRoot() = %q, %v", root, err)
+	}
 	t.Setenv(EnvRoot, "relative/path")
-	if _, err := DefaultRoot(); err == nil {
+	if _, err := ResolveRoot(""); err == nil {
 		t.Error("relative override accepted")
 	}
-	t.Setenv(EnvRoot, "/abs/path")
-	if root, err := DefaultRoot(); err != nil || root != "/abs/path" {
-		t.Errorf("DefaultRoot() = %q, %v", root, err)
-	}
+
+	// With no environment override, the configured value is used.
 	t.Setenv(EnvRoot, "")
-	root, err := DefaultRoot()
+	if root, err := ResolveRoot("/from/config"); err != nil || root != "/from/config" {
+		t.Errorf("ResolveRoot(configured) = %q, %v", root, err)
+	}
+	if _, err := ResolveRoot("relative/config"); err == nil {
+		t.Error("relative configured value accepted")
+	}
+
+	// With neither, the built-in default.
+	root, err := ResolveRoot("")
 	if err != nil || !filepath.IsAbs(root) || !strings.HasSuffix(root, filepath.FromSlash(cacheSubdir)) {
-		t.Errorf("DefaultRoot() = %q, %v", root, err)
+		t.Errorf("ResolveRoot() = %q, %v", root, err)
 	}
 }

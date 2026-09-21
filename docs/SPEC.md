@@ -246,8 +246,9 @@ receive it.
 ### State file
 
 The state file lives at `os.UserConfigDir()/counterpoint/state.json`, or at
-the absolute path in `COUNTERPOINT_STATE_FILE`, the one override, for tests
-and unusual installations. It is a versioned JSON envelope:
+the absolute path in `COUNTERPOINT_STATE_FILE`, or at `state_file` in the
+configuration file, in that order of precedence (see "Configuration"). It is
+a versioned JSON envelope:
 
 ```json
 {
@@ -453,14 +454,21 @@ warning and in the log.
 ### Model and reasoning effort
 
 Counterpoint does not select a model; Codex's configured default applies.
-It does fix the reasoning effort at `xhigh`, passed as a
-`model_reasoning_effort` override on the child's command line, so the
-reviewer runs at a deliberate level regardless of the user's interactive
-setting. This is a fixed policy chosen by DR, not a rule that the highest
-advertised level is used: the catalog advertises levels above `xhigh` on
-some models, including one that enables automatic delegation a reviewer
-should not adopt implicitly. If the configured model rejects the constant,
-the review fails with the app-server's error rather than retrying lower.
+It does set the reasoning effort, passed as a `model_reasoning_effort`
+override on the child's command line, so the reviewer runs at a deliberate
+level regardless of the user's interactive setting. The default is `high`,
+and `review_effort` in the configuration file selects one of `low`,
+`medium`, `high`, or `xhigh`.
+
+The accepted set is Counterpoint's policy, not the protocol's: the
+app-server schema types reasoning effort as any non-empty string the model
+advertises. The ceiling at `xhigh` is deliberate and is not a rule that the
+highest advertised level is used: the catalog advertises levels above
+`xhigh` on some models, including one that enables automatic delegation a
+reviewer should not adopt implicitly. Raising the ceiling is a policy
+decision, not a configuration change. If the configured model rejects the
+selected value, the review fails with the app-server's error rather than
+retrying lower.
 The effective model and effort the thread call reports are logged beside the
 configured effort, because the reported effort is nullable and
 `thread/resume` has been observed to omit it while the override remained in
@@ -667,10 +675,60 @@ effort, duration, terminal status, warnings count, and any declined
 request. Logs do not include branch notes, model output, credentials, or
 environment dumps by default.
 
+## Configuration
+
+Counterpoint reads one optional configuration file,
+`os.UserConfigDir()/counterpoint/config.json`, beside the default state
+file, or the absolute path in `COUNTERPOINT_CONFIG_FILE`. Its location does
+not follow `COUNTERPOINT_STATE_FILE`, so a redirected state file does not
+move the configuration file with it. It is the user's own file: no
+part of it is read from a reviewed repository, and it carries no
+per-repository policy, which stays limited to `COUNTERPOINT.md`.
+
+```json
+{
+  "review_effort": "high",
+  "state_file": "/absolute/path/state.json",
+  "checkout_dir": "/absolute/path/checkouts"
+}
+```
+
+| Key | Accepted | Default |
+| --- | --- | --- |
+| `review_effort` | `low`, `medium`, `high`, `xhigh` | `high` |
+| `state_file` | absolute path | `os.UserConfigDir()/counterpoint/state.json` |
+| `checkout_dir` | absolute path | `os.UserCacheDir()/counterpoint/checkouts` |
+
+Precedence for each value is the environment variable, then the file, then
+the built-in default, so an existing environment override keeps working and
+keeps winning.
+
+A missing file is the normal case and means the defaults. A file that exists
+is validated in full when the process starts, before any review, and any
+rejection ends startup with an error naming the file, the key, and the
+accepted values. Rejected: anything that is not a JSON object, including a
+bare `null`; an unknown key, which would otherwise leave a misspelled
+setting silently inert; any content after the object, including a stray
+closing delimiter; a value of the wrong type; a key whose value is `null`,
+which once decoded is indistinguishable from omission and would silently
+apply the default; an effort outside the accepted set; a path that is not
+absolute; a key present but set to the empty string, which is a mistake
+rather than a request for the default; and a file over 64 KiB.
+
+The file's type is checked before it is opened, and again on the open
+descriptor. Opening a FIFO with no writer blocks indefinitely, so checking
+only the descriptor would let a mistyped path hang startup rather than
+report invalid configuration. The check follows symlinks, so a
+configuration file symlinked from elsewhere works.
+
+The file's location and the values in force are logged at startup. Reasoning
+and rejected alternatives are in `docs/design/configuration.md`.
+
 ## Limits
 
 Every fixed bound in the runtime, in one place. The constants are named in
-the code; none is configurable.
+the code, and none of the bounds in this table is configurable; what the
+configuration file does own is listed under "Configuration".
 
 | Bound | Value |
 | --- | --- |
@@ -697,10 +755,11 @@ the code; none is configurable.
 | Git stdout captured; stderr captured; stderr quoted | 1 MiB; 64 KiB; 512 B |
 | Lock file and scratch directory name | 16 hex characters of SHA-256 |
 
-Environment variables Counterpoint reads: `COUNTERPOINT_STATE_FILE` and
-`COUNTERPOINT_CHECKOUT_DIR`, both absolute paths. Variables it sets for the
-reviewer's commands in a build-capable review: `TMPDIR` and
-`COUNTERPOINT_CACHE_DIR`.
+Environment variables Counterpoint reads: `COUNTERPOINT_STATE_FILE`,
+`COUNTERPOINT_CHECKOUT_DIR`, and `COUNTERPOINT_CONFIG_FILE`, all absolute
+paths. Variables it sets for the reviewer's commands in a build-capable
+review: `TMPDIR` and `COUNTERPOINT_CACHE_DIR`. See "Configuration" for the
+file and the precedence between the two.
 
 ## Testing
 
@@ -738,7 +797,11 @@ regression test (`CLAUDE.md`, "Security and testing").
 
 ## Out of scope
 
-Not implemented, and not to be added without an accepted design:
+Not implemented, and not to be added without an accepted design. This list
+described the MVP's boundary; past the MVP it is narrowed as work is
+designed and accepted, and an entry is removed in the change that
+implements it rather than in advance (amended 2026-09-21, reviewer effort
+made configurable, `docs/design/configuration.md`):
 
 - A resident daemon or network listener; durable completion after the MCP
   client disconnects, including persistent in-flight state and crash
@@ -750,8 +813,8 @@ Not implemented, and not to be added without an accepted design:
 - Automatic implementation of findings; structured verdict enforcement or
   finding databases.
 - An explicit thread reset operation.
-- Configurable prompts, timeouts, or budgets; model selection; per-model
-  effort selection from the catalog; per-repository policy beyond
+- Configurable prompts, timeouts, or budgets; model selection; effort
+  levels above the `xhigh` ceiling; per-repository policy beyond
   `COUNTERPOINT.md`.
 - Branch lifecycle management, state garbage collection, or a size bound on
   the scratch root beyond the 72-hour sweep.
